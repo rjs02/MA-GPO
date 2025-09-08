@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Beyond Bradley-Terry Models: A General Preference Model for Language Model Alignment</title>
+
+    <meta name="description" content="A general preference model (GPM) that uses preference embedding to capture complex and intransitive human preferences for language model alignment, outperforming traditional Bradley-Terry models.">
+    <meta name="keywords" content="General Preference Model, GPM, Language Model Alignment, Preference Embedding, RLHF, Bradley-Terry Model, Intransitive Preferences">
+    <!-- Google Scholar / Highwire meta -->
+    <meta name="citation_title" content="Beyond Bradley-Terry Models: A General Preference Model for Language Model Alignment">
+    <meta name="citation_author" content="Yifan Zhang">
+    <meta name="citation_author" content="Ge Zhang">
+    <meta name="citation_author" content="Yue Wu">
+    <meta name="citation_author" content="Kangping Xu">
+    <meta name="citation_author" content="Quanquan Gu">
+    <meta name="citation_publication_date" content="2024/10/03">
+    <meta name="citation_pdf_url" content="https://arxiv.org/pdf/2410.02197.pdf">
+
+    <meta property="og:title" content="Beyond Bradley-Terry Models: A General Preference Model for Language Model Alignment"/>
+    <meta property="og:description" content="GPM introduces preference embedding to efficiently model complex preference structures, including intransitive ones, for better language model alignment."/>
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://general-preference.github.io/general-preference-model/" />
+    <link rel="canonical" href="https://general-preference.github.io/general-preference-model/">
+    <link rel="icon" href="https://placehold.co/32x32/4A90E2/FFFFFF?text=GP" type="image/x-icon">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.9.4/css/bulma.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <script>
+        MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+            },
+            svg: { fontCache: 'global' }
+        };
+    </script>
+    <script type="text/javascript" id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+
+    <style>
+        :root {
+            --primary-color: #004080; /* Lighter navy blue */
+            --accent-color: #CFB87C; 
+            --main-bg: #FFFFFF; /* Brighter main background */
+            --content-bg: #F8F9FA; /* Light grey for content sections */
+            --text-main: #363636;
+            --text-on-primary: #FFFFFF;
+            --link-color: var(--primary-color);
+            --link-hover-color: var(--accent-color);
+            --border-color: #e0e0e0;
+            --shadow-color: rgba(0, 0, 0, 0.1);
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            background-color: var(--main-bg);
+            color: var(--text-main);
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* Sticky Navbar */
+        .navbar {
+            background-color: rgba(var(--primary-color-rgb), 0.9);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 5px var(--shadow-color);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .navbar-brand a.navbar-item, .navbar-menu a.navbar-item {
+            color: var(--text-on-primary);
+            font-weight: 500;
+        }
+        .navbar-brand a.navbar-item:hover, .navbar-menu a.navbar-item:hover, .navbar-item.is-active {
+            background-color: transparent !important;
+            color: var(--accent-color) !important;
+        }
+        .navbar-burger { color: var(--text-on-primary); }
+
+        /* Hero Section */
+        .hero {
+            background: var(--primary-color);
+            color: var(--text-on-primary);
+        }
+        .hero .title {
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 700;
+            color: var(--text-on-primary);
+            font-size: 3.2rem;
+        }
+        .hero .subtitle.is-hero-subtitle {
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 1.3rem;
+            max-width: 800px;
+            margin: 1.5rem auto 2.5rem auto;
+        }
+        .hero .subtitle .highlight {
+            color: var(--accent-color);
+            font-weight: 600;
+        }
+        .project-links a {
+            color: var(--text-on-primary);
+            font-size: 1.5rem;
+            margin: 0 0.75rem;
+            transition: color 0.3s ease, transform 0.3s ease;
+        }
+        .project-links a:hover {
+            color: var(--accent-color);
+            transform: translateY(-3px);
+        }
+
+        /* Content Sections */
+        .section.content-section {
+            padding: 5rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .section.content-section:nth-child(even) { background-color: var(--content-bg); }
+        .section-title {
+            font-family: 'Space Grotesk', sans-serif;
+            color: var(--primary-color);
+            font-weight: 700;
+            margin-bottom: 3rem;
+        }
+        .content {
+            max-width: 960px;
+            margin: 0 auto;
+            line-height: 1.8;
+            font-size: 1.05rem;
+        }
+        .content a {
+            color: var(--link-color);
+            font-weight: 500;
+            text-decoration: none;
+            border-bottom: 2px solid rgba(var(--link-color-rgb), 0.2);
+        }
+        .content a:hover {
+            color: var(--link-hover-color);
+            border-bottom-color: var(--link-hover-color);
+        }
+        .content img {
+            display: block;
+            margin: 2rem auto;
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .content table.table {
+            border-radius: 6px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.07);
+        }
+        .content table th {
+            background-color: var(--primary-color);
+            color: var(--text-on-primary) !important;
+        }
+        .content pre {
+            background-color: #282c34;
+            color: #abb2bf;
+            border-radius: 6px;
+            padding: 1.25em;
+        }
+
+        /* Footer */
+        .footer {
+            background: var(--primary-color);
+            color: var(--text-on-primary);
+            padding: 2rem 1.5rem;
+            border-top: 4px solid var(--accent-color);
+            margin-top: auto;
+        }
+        .footer .content p { color: var(--text-on-primary); }
+        .footer a {
+            color: var(--accent-color);
+            font-weight: 500;
+        }
+        .footer a:hover { color: var(--text-on-primary); }
+
+        /* Responsive Design */
+        @media (max-width: 1023px) {
+            .navbar-menu {
+                background-color: rgba(var(--primary-color-rgb), 0.95);
+                backdrop-filter: blur(5px);
+            }
+        }
+        @media (max-width: 768px) {
+            .hero .title { font-size: 2.2rem; }
+            .hero .subtitle.is-hero-subtitle { font-size: 1.1rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <nav class="navbar" role="navigation" aria-label="main navigation">
+        <div class="container">
+            <div class="navbar-brand">
+                <a class="navbar-item is-size-5 has-text-weight-bold" href="#">General Preference Model</a>
+                <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false" data-target="navbarMenu">
+                    <span aria-hidden="true"></span>
+                    <span aria-hidden="true"></span>
+                    <span aria-hidden="true"></span>
+                </a>
+            </div>
+            <div id="navbarMenu" class="navbar-menu">
+                <div class="navbar-end">
+                    <a href="#about" class="navbar-item">About</a>
+                    <a href="#model" class="navbar-item">Model</a>
+                    <a href="#results" class="navbar-item">Results</a>
+                    <a href="#gpo" class="navbar-item">GPO</a>
+                    <a href="#citation" class="navbar-item">Citation</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <header class="hero is-medium">
+        <div class="hero-body">
+            <div class="container has-text-centered">
+                <h1 class="title">Beyond Bradley-Terry Models: A General Preference Model for Language Model Alignment</h1>
+                <h2 class="subtitle is-hero-subtitle">
+                    Introducing <span class="highlight">preference embedding</span>, a novel approach to capture complex and intransitive human preferences for aligning language models with human values.
+                </h2>
+                <h3 class="subtitle is-5" style="color: rgba(255, 255, 255, 0.9); margin-top: 2rem; margin-bottom: -1.5rem;">
+                   <a href="#" style="color: var(--accent-color); font-weight: 600; text-decoration: none;">Yifan Zhang</a><span style="padding: 0 0.5em;"></span>
+                   <a href="#" style="color: var(--accent-color); font-weight: 600; text-decoration: none;">Ge Zhang</a><span style="padding: 0 0.5em;"></span>
+                   <a href="#" style="color: var(--accent-color); font-weight: 600; text-decoration: none;">Yue Wu</a><span style="padding: 0 0.5em;"></span>
+                   <a href="#" style="color: var(--accent-color); font-weight: 600; text-decoration: none;">Kangping Xu</a><span style="padding: 0 0.5em;"></span>
+                   <a href="https://www.cs.ucla.edu/~qgu/" target="_blank" rel="noopener noreferrer" style="color: var(--accent-color); font-weight: 600; text-decoration: none;">Quanquan Gu</a>
+                </h3>
+                <div class="project-links">
+                    <a href="https://arxiv.org/pdf/2410.02197.pdf" target="_blank" rel="noopener noreferrer" aria-label="Paper"><i class="fas fa-file-pdf"></i> Paper</a>
+                    <a href="https://arxiv.org/abs/2410.02197" target="_blank" rel="noopener noreferrer" aria-label="arXiv"><i class="fas fa-archive"></i> arXiv</a>
+                    <a href="https://github.com/general-preference/general-preference-model" target="_blank" rel="noopener noreferrer" aria-label="GitHub"><i class="fab fa-github"></i> Code</a>
+                    <a href="#citation" aria-label="Citation"><i class="fas fa-quote-right"></i> Cite</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section id="about" class="section content-section">
+            <div class="container">
+                <h2 class="title is-3 has-text-centered section-title">Abstract</h2>
+                <div class="content has-text-justified" style="max-width: 800px; margin: 0 auto;">
+                    <p>
+                        Modeling human preferences is crucial for aligning foundation models with human values. Traditional reward modeling methods, such as the Bradley-Terry (BT) reward model, fall short in expressiveness, particularly in addressing <strong>intransitive preferences</strong>. In this paper, we introduce <strong>preference embedding</strong>, an approach that embeds responses into a latent space to capture intricate preference structures efficiently, achieving linear query complexity. Additionally, we propose preference score-based <strong>General Preference Optimization (GPO)</strong>, which generalizes reward-based reinforcement learning from human feedback (RLHF).
+                    </p>
+                    <p>
+                        Our <strong>General Preference embedding Model (GPM)</strong> consistently outperforms the BT reward model on the RewardBench benchmark and effectively models cyclic preferences. Evaluations on downstream tasks, following language model post-training with GPO, reveal performance improvements over BT models. These findings indicate that our method may enhance the alignment of foundation models with nuanced human values.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section id="model" class="section content-section">
+            <div class="container">
+                <h2 class="title is-3 has-text-centered section-title">The General Preference Model (GPM)</h2>
+                <div class="content">
+                    <p class="has-text-centered">
+                        GPM bridges the gap between the efficiency of Bradley-Terry models and the expressiveness of pairwise comparison models.
+                    </p>
+                    <img src="https://i.imgur.com/G4hE0Sg.png" alt="Illustration of Bradley-Terry, PairRM, and GPM models">
+                    <p class="has-text-centered is-size-7">
+                        <strong>Figure 1:</strong> (a) The BT model assigns a scalar reward to each response. (b) Pairwise models (PairRM/PairPM) evaluate every pair, leading to $\mathcal{O}(K^2)$ complexity. (c) Our GPM embeds each response once and computes preference scores via vector interactions, achieving $\mathcal{O}(K)$ complexity.
+                    </p>
+                     <p>
+                        The core idea is to represent each response $y$ for a prompt $x$ as a multi-dimensional <strong>preference embedding vector</strong> $v_{y|x} \in \mathbb{R}^{2k}$. The preference score between two responses, $y_i$ and $y_j$, is then calculated using a skew-symmetric operator $R^{>}$:
+                    </p>
+                    <p class="has-text-centered">
+                        $s(y_i > y_j | x) = \langle R^{>} v_{y_i|x}, v_{y_j|x} \rangle$
+                    </p>
+                    <p>
+                        This formulation allows GPM to capture complex relationships, including intransitive (e.g., cyclic) preferences, which cannot be represented by simple scalar rewards. The model is fully expressive for any real skew-symmetric preference matrix.
+                    </p>
+                </div>
+            </div>
+        </section>
+        
+        <section id="results" class="section content-section">
+            <div class="container">
+                <h2 class="title is-3 has-text-centered section-title">Experimental Results</h2>
+                <div class="content">
+                    <h3 class="subtitle is-4 has-text-centered">Modeling Cyclic Preferences</h3>
+                    <p>
+                        We tested GPM's ability to model intransitive preferences. On our created Cyclic Preference datasets, GPM achieves near-perfect accuracy, while the traditional Bradley-Terry (BT) model performs close to random guessing, highlighting its fundamental limitation.
+                    </p>
+                    <table class="table is-bordered is-striped is-fullwidth">
+                        <thead>
+                            <tr><th>Model</th><th>Dataset</th><th>Accuracy (%)</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Random Guess</td><td>-</td><td>50.0</td></tr>
+                            <tr><td>BT RM</td><td>Cyclic No. 1</td><td>62.4</td></tr>
+                            <tr><td><strong>GPM</strong></td><td>Cyclic No. 1</td><td><strong>100.0 (+37.6)</strong></td></tr>
+                            <tr><td>BT RM</td><td>Cyclic No. 3</td><td>50.0</td></tr>
+                            <tr><td><strong>GPM</strong></td><td>Cyclic No. 3</td><td><strong>100.0 (+50.0)</strong></td></tr>
+                        </tbody>
+                    </table>
+
+                    <h3 class="subtitle is-4 has-text-centered" style="margin-top: 3rem;">RewardBench Performance</h3>
+                    <p>
+                        GPM consistently outperforms the BT reward model on the RewardBench benchmark across different base models and tasks, especially in the more nuanced Chat and Chat-Hard categories.
+                    </p>
+                    <table class="table is-bordered is-striped is-fullwidth">
+                        <thead>
+                           <tr><th>Base Model</th><th>Model</th><th>Chat</th><th>Chat-Hard</th><th>Safety</th><th>Reasoning</th><th>Average</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td rowspan="2">Gemma-2B-it</td>
+                                <td>BT RM</td><td>67.32</td><td>63.37</td><td>85.68</td><td>83.04</td><td>74.85</td>
+                            </tr>
+                            <tr>
+                                <td><strong>GPM (d=6)</strong></td><td><strong>79.61</strong></td><td><strong>75.66</strong></td><td>85.27</td><td><strong>88.61</strong></td><td><strong>82.29 (+7.44)</strong></td>
+                            </tr>
+                            <tr>
+                                <td rowspan="2">Llama-3.1-8B-Instruct</td>
+                                <td>BT RM</td><td>88.55</td><td>85.75</td><td>91.49</td><td>96.47</td><td>90.56</td>
+                            </tr>
+                            <tr>
+                                <td><strong>GPM (d=8)</strong></td><td><strong>93.58</strong></td><td><strong>87.50</strong></td><td>91.08</td><td>95.44</td><td><strong>91.90 (+1.34)</strong></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <section id="gpo" class="section content-section">
+            <div class="container">
+                <h2 class="title is-3 has-text-centered section-title">General Preference Optimization (GPO)</h2>
+                <div class="content">
+                    <p>
+                        To align language models using our GPM, we propose General Preference Optimization (GPO). GPO is an iterative algorithm that uses the preference scores from GPM to directly optimize the language model's policy. The objective is to maximize the expected preference score against an opponent policy:
+                    </p>
+                    <p class="has-text-centered">
+                       $ \max_{\theta} \mathbb{E}_{x \sim \mathcal{X}, y \sim \pi_{\theta}, y' \sim \pi'} [s(y > y' | x)] - \beta \mathbb{E}_{x \sim \mathcal{X}}[\text{KL}(\pi_{\theta}(\cdot|x) || \pi_{\text{ref}}(\cdot|x))] $
+                    </p>
+                    <p>
+                        Evaluations on AlpacaEval 2.0 show that models aligned with GPO consistently achieve higher win rates compared to those aligned with traditional methods, demonstrating the practical benefits of our more expressive preference model.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section id="citation" class="section content-section">
+            <div class="container">
+                <h2 class="title is-3 has-text-centered section-title">Citation</h2>
+                <div class="content">
+                    <p>If you find our work useful, please cite our paper:</p>
+<pre><code>@inproceedings{zhangbeyond,
+  title={Beyond Bradley-Terry Models: A General Preference Model for Language Model Alignment},
+  author={Zhang, Yifan and Zhang, Ge and Wu, Yue and Xu, Kangping and Gu, Quanquan},
+  booktitle={Forty-second International Conference on Machine Learning}
+}</code></pre>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="content has-text-centered">
+                <p>
+                    &copy; 2024 General Preference Model (GPM) Team. All rights reserved.
+                </p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // JavaScript for the mobile navbar toggle
+        document.addEventListener('DOMContentLoaded', () => {
+            const $navbarBurgers = Array.prototype.slice.call(document.querySelectorAll('.navbar-burger'), 0);
+            if ($navbarBurgers.length > 0) {
+                $navbarBurgers.forEach( el => {
+                    el.addEventListener('click', () => {
+                        const target = el.dataset.target;
+                        const $target = document.getElementById(target);
+                        el.classList.toggle('is-active');
+                        $target.classList.toggle('is-active');
+                    });
+                });
+            }
+
+            // Function to convert hex to rgb for rgba() usage
+            function hexToRgb(hex) {
+                let result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+                return result ? {
+                    r: parseInt(result[1], 16),
+                    g: parseInt(result[2], 16),
+                    b: parseInt(result[3], 16)
+                } : null;
+            }
+
+            // Set RGB versions of colors for use in rgba()
+            const root = document.documentElement;
+            const styles = getComputedStyle(root);
+            const primaryColor = styles.getPropertyValue('--primary-color').trim();
+            const linkColor = styles.getPropertyValue('--link-color').trim();
+
+            const primaryRgb = hexToRgb(primaryColor);
+            if (primaryRgb) {
+                root.style.setProperty('--primary-color-rgb', `${primaryRgb.r}, ${primaryRgb.g}, ${primaryRgb.b}`);
+            }
+
+            const linkRgb = hexToRgb(linkColor);
+            if (linkRgb) {
+                 root.style.setProperty('--link-color-rgb', `${linkRgb.r}, ${linkRgb.g}, ${linkRgb.b}`);
+            }
+        });
+    </script>
+
+</body>
+</html>
