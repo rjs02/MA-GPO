@@ -2,7 +2,7 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2410.02197-b31b1b.svg)](https://arxiv.org/abs/2410.02197) 
 [![Website](https://img.shields.io/badge/Project-Website-green)](https://general-preference.github.io/general-preference-model) 
-[![Technical Report](https://img.shields.io/badge/Technical-Report-blue)](https://iiis-ai.github.io/AutoMathText-V2/AutoMathText-V2.pdf) 
+[![Huggingface Paper](https://img.shields.io/badge/Huggingface-Papers-blue)](https://huggingface.co/papers/2410.02197) 
 
 [ICML 2025] Beyond Bradley-Terry Models: A General Preference
 Model for Language Model Alignment, [https://arxiv.org/abs/2410.02197](https://arxiv.org/abs/2410.02197). As Huggingface Daily Papers: [https://huggingface.co/papers/2410.02197](https://huggingface.co/papers/2410.02197)
