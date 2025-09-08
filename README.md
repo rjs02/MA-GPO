@@ -5,9 +5,7 @@
 [![Technical Report](https://img.shields.io/badge/Technical-Report-blue)](https://iiis-ai.github.io/AutoMathText-V2/AutoMathText-V2.pdf) 
 
 [ICML 2025] Beyond Bradley-Terry Models: A General Preference
-Model for Language Model Alignment, [https://arxiv.org/abs/2410.02197](https://arxiv.org/abs/2410.02197)
-
-As Huggingface Daily Papers: [https://huggingface.co/papers/2410.02197](https://huggingface.co/papers/2410.02197)
+Model for Language Model Alignment, [https://arxiv.org/abs/2410.02197](https://arxiv.org/abs/2410.02197). As Huggingface Daily Papers: [https://huggingface.co/papers/2410.02197](https://huggingface.co/papers/2410.02197)
 
 ![](GPM.png)
 
