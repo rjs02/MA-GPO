@@ -5,9 +5,12 @@ Model for Language Model Alignment, [https://arxiv.org/abs/2410.02197](https://a
 
 As Huggingface Daily Papers: [https://huggingface.co/papers/2410.02197](https://huggingface.co/papers/2410.02197)
 
+![](GPM.png)
+
+
 ## Introduction
 
-This repository is designed for training and evaluating the General Preference representation model (GPM). It includes the following:
+This repository is designed for training and evaluating the General Preference embedding model (GPM). It includes the following:
 
 * Training code for both GPM and BT reward models.
 
@@ -80,7 +83,7 @@ print(result_batch)
 
 ## Citations
 
-Please cite the paper and star this repo if you use the General Preference Representation Model (GPM) and General Preference Optimization (GPO) and find it interesting/useful, thanks! Feel free to contact zhangge19951114@gmail.com | yifanzhangresearch@gmail.com or open an issue if you have any questions.
+Please cite the paper and star this repo if you use the General Preference embedding Model (GPM) and General Preference Optimization (GPO) and find it interesting/useful, thanks! Feel free to contact zhangge19951114@gmail.com | yifanzhangresearch@gmail.com or open an issue if you have any questions.
 
 ```
 @inproceedings{zhang2024beyond,
