@@ -7,7 +7,10 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from peft.tuners.lora import LoraLayer
 from transformers import AutoConfig, AutoModel, BitsAndBytesConfig, AutoModelForCausalLM
-from transformers.deepspeed import HfDeepSpeedConfig
+try:
+    from transformers.integrations import HfDeepSpeedConfig
+except ImportError:
+    from transformers.deepspeed import HfDeepSpeedConfig
 from general_preference.utils.logging import init_logger
 import torch.nn.functional as F
 

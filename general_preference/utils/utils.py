@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from datasets import Dataset, interleave_datasets, load_dataset
+from datasets import Dataset, interleave_datasets, load_dataset, load_from_disk
 from transformers import AutoTokenizer
 import torch
 from general_preference.utils import DeepspeedStrategy
@@ -63,6 +63,19 @@ def blending_datasets(
                 data_type = os.path.splitext(files)[1][1:]
             else:
                 path = Path(dataset)
+                # Check if this is a HuggingFace dataset saved with save_to_disk()
+                state_file = path / "state.json"
+                dataset_info_file = path / "dataset_info.json"
+                if state_file.exists() or dataset_info_file.exists():
+                    # This is a HuggingFace Arrow dataset, use load_from_disk
+                    strategy.print(f"load {dataset} with load_from_disk (HuggingFace Arrow format)")
+                    data = load_from_disk(dataset)
+                    if "train" in data:
+                        train_data_list.append(data["train"].select(range(min(max_count, len(data["train"])))))
+                    else:
+                        train_data_list.append(data.select(range(min(max_count, len(data)))))
+                    continue
+
                 script = [str(file.resolve()) for file in Path(path).rglob("*.py")]
                 extensions = ("*.json", "*.jsonl", "*.csv", "*.parquet", "*.txt")
                 files = [str(file) for ext in extensions for file in Path(path).rglob(ext)]
