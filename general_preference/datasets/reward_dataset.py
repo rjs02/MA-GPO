@@ -4,8 +4,21 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from .utils import exist_and_not_none, zero_pad_sequences
 
-def preprocess_data(data, is_custom=False):
-    if is_custom:
+def preprocess_data(data, is_custom=False, use_separate_prompt=False):
+    if use_separate_prompt:
+        # Handle format with separate prompt field (e.g., from build_ufb_data.py)
+        # prompt: [{"role": "user", "content": ...}]
+        # chosen: [{"role": "assistant", "content": ...}]
+        # rejected: [{"role": "assistant", "content": ...}]
+        prompt = data["prompt"]
+        chosen_response = data["chosen"]
+        rejected_response = data["rejected"]
+        # Combine into full conversation
+        chosen = prompt + chosen_response
+        rejected = prompt + rejected_response
+        margin = data["margin"] if exist_and_not_none(data, "margin") else 0
+        return None, chosen, rejected, margin
+    elif is_custom:
         if "chosen" in data and "response" in data["chosen"]:
             prompt = data["instruction"]
             chosen = data["chosen"]["response"]
@@ -39,6 +52,7 @@ class GeneralRewardDataset(Dataset):
         strategy,
         is_custom=False,
         return_prompt_length=False,
+        use_separate_prompt=False,
     ) -> None:
         super().__init__()
         self.prompts = []
@@ -50,9 +64,12 @@ class GeneralRewardDataset(Dataset):
         self.max_length = max_length
         self.is_custom = is_custom
         self.return_prompt_length = return_prompt_length
+        self.use_separate_prompt = use_separate_prompt
 
         for data in tqdm(dataset, disable=not self.strategy.is_rank_0()):
-            prompt, chosen, reject, margin = preprocess_data(data, is_custom=self.is_custom)
+            prompt, chosen, reject, margin = preprocess_data(
+                data, is_custom=self.is_custom, use_separate_prompt=self.use_separate_prompt
+            )
             self.prompts.append(prompt)
             self.chosens.append(chosen)
             self.rejects.append(reject)

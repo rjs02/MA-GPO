@@ -57,17 +57,17 @@ def train(args):
         train_data = total_data.select(range(int(total_data_lengh * args.train_split_ratio)))
         eval_data = total_data.select(range(int(total_data_lengh * args.train_split_ratio), total_data_lengh))
         
-        train_dataset = GeneralRewardDataset(train_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length)
+        train_dataset = GeneralRewardDataset(train_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
         train_dataloader = strategy.setup_dataloader(
             train_dataset,
             args.micro_train_batch_size,
             True,
             True,
             train_dataset.collate_fn,
-            group_size=args.group_size, 
+            group_size=args.group_size,
         )
         if len(eval_data) != 0:
-            eval_dataset = GeneralRewardDataset(eval_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length)
+            eval_dataset = GeneralRewardDataset(eval_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
             eval_dataloader = strategy.setup_dataloader(
                 eval_dataset, args.micro_train_batch_size, True, False, eval_dataset.collate_fn
             )
@@ -75,14 +75,14 @@ def train(args):
             eval_dataloader=None
             strategy.print("No separate validation data split was detected. The entire dataset will be utilized for training.")
     else:
-        train_dataset = GeneralRewardDataset(total_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length)
+        train_dataset = GeneralRewardDataset(total_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
         train_dataloader = strategy.setup_dataloader(
             train_dataset,
             args.micro_train_batch_size,
             True,
             True,
             train_dataset.collate_fn,
-            group_size=args.group_size, 
+            group_size=args.group_size,
         )
         eval_dataloader=None
         strategy.print("No separate validation data split was detected. The entire dataset will be utilized for training.")
@@ -177,8 +177,9 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_checkpointing_use_reentrant", action="store_true")
     parser.add_argument("--disable_fast_tokenizer", action="store_true", default=False)
     
-    # custom arguments added 
+    # custom arguments added
     parser.add_argument("--is_custom_dataset", action="store_true", default=False, help="Whether to use custom cyclic dataset. Default to False.")
+    parser.add_argument("--use_separate_prompt", action="store_true", default=False, help="Use separate prompt format where data has 'prompt', 'chosen', 'rejected' fields (e.g., from build_ufb_data.py).")
     parser.add_argument("--is_general_preference", action="store_true", default=False, help="Whether to use General Preference model. Default to False (Bradley Terry model by default).")
     parser.add_argument("--general_preference_tau", type=float, default=0.1, help="Hyperparameter tau used in general preference loss.")
     parser.add_argument("--group_size", type=int, default=1, help="Number of data to group together during shuffling.")
