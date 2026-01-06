@@ -297,7 +297,10 @@ class GeneralPreferenceRewardTrainer(ABC):
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
-                margin = torch.tensor(margin).to(torch.cuda.current_device())
+                if self.margin_loss:
+                    margin = torch.tensor(margin).to(torch.cuda.current_device())
+                else:
+                    margin = None
                 chosen_response_len = torch.tensor(chosen_response_len).view(-1, 1).to(torch.cuda.current_device())
 
                 return_output = True if isinstance(self.loss_fn, HighDimGeneralPreferenceRegressionMoELoss) else False
