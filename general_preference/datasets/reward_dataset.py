@@ -87,9 +87,15 @@ class GeneralRewardDataset(Dataset):
         else:
             if self.tokenizer.chat_template is not None:
                 if self.return_prompt_length:
-                    prompt = self.tokenizer.apply_chat_template([chosen[0]], tokenize=False)
-                chosen = self.tokenizer.apply_chat_template(chosen, tokenize=False)
-                reject = self.tokenizer.apply_chat_template(reject, tokenize=False)
+                    prompt = self.tokenizer.apply_chat_template(
+                        [chosen[0]], tokenize=False, add_generation_prompt=False, enable_thinking=False
+                    )
+                chosen = self.tokenizer.apply_chat_template(
+                    chosen, tokenize=False, add_generation_prompt=False, enable_thinking=False
+                )
+                reject = self.tokenizer.apply_chat_template(
+                    reject, tokenize=False, add_generation_prompt=False, enable_thinking=False
+                )
             else:
                 if self.return_prompt_length:
                     prompt = chosen[0]['content']
