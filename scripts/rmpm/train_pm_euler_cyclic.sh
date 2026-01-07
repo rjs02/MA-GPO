@@ -3,7 +3,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=rtx_4090:2
 #SBATCH --gres=gpumem:23872m
-#SBATCH --time=24:00:00
+#SBATCH --time=04:00:00
 #SBATCH --mem-per-cpu=4096
 #SBATCH --job-name=train_gpm
 #SBATCH --mail-type=BEGIN,END
@@ -34,21 +34,19 @@ export WANDB_CACHE_DIR="$SCRATCH_DIR/wandb/cache"
 MODEL="Qwen/Qwen3-0.6B"
 # Dataset should be in HuggingFace datasets format or JSONL
 # With fields: prompt, chosen, rejected, margin (optional)
-# DATASET_PATH="/cluster/home/rosieber/OpenNLHF/data/cyclic_triplets_v2/Cyclic_1"
-DATASET_PATH="${LASDIR}/data/ufb/pref_train"
+DATASET_PATH="/cluster/home/rosieber/OpenNLHF/data/cyclic_triplets_v2/Cyclic_1"
+# DATASET_PATH="${LASDIR}/data/ufb/pref_train"
 
 # GPM-specific settings
-VALUE_HEAD_DIM=6        # Higher dims (6, 8) capture more complex intransitive preferences
+VALUE_HEAD_DIM=1        # Higher dims (6, 8) capture more complex intransitive preferences, 1 => BT + remove general pref flag
 TAU=0.1                 # Temperature for preference scaling
 LR=1e-6
-EPOCHS=2
-MICRO_BATCH_SIZE=2      # Per-GPU batch size
-ACCUMULATED_GRADIENT=2  # Gradient accumulation steps
+EPOCHS=100
+MICRO_BATCH_SIZE=4      # Per-GPU batch size
+ACCUMULATED_GRADIENT=1  # Gradient accumulation steps
 # Effective batch size = MICRO_BATCH_SIZE * ACCUMULATED_GRADIENT * num_gpus = 8 * 8 * 1 = 64
 
-DATE=$(date +%Y%m%d_%H%M%S)
-
-export EXP_NAME="qwen3-0.6b-gpm-dim${VALUE_HEAD_DIM}-ufb-${DATE}"
+export EXP_NAME="qwen3-0.6b-gpm-dim${VALUE_HEAD_DIM}-cyclic"
 export SAVE_PATH="$SCRATCH_DIR/experiments/$EXP_NAME"
 
 export TRITON_CACHE_DIR="${SCRATCH_DIR}/.triton/autotune"
@@ -72,8 +70,7 @@ deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_general_prefe
     --micro_train_batch_size $MICRO_BATCH_SIZE \
     --accumulated_gradient $ACCUMULATED_GRADIENT \
     --learning_rate $LR \
-    --max_len 2048 \
-    --is_general_preference \
+    --max_len 1024 \
     --zero_stage 2 \
     --bf16 \
     --flash_attn \
@@ -81,13 +78,14 @@ deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_general_prefe
     --general_preference_tau $TAU \
     --use_separate_prompt \
     --gradient_checkpointing \
-    --train_split_ratio 0.995 \
+    --train_split_ratio 0.9 \
     --use_wandb "rjs02-eth-z-rich" \
     --wandb_project "GPO PM" \
     --wandb_org "rjs02-eth-z-rich" \
-    --wandb_run_name "${EXP_NAME}" \
-    --eval_steps 50 \
+    --wandb_run_name "${EXP_NAME}_$(date +%Y%m%d_%H%M%S)" \
+    --eval_steps 5 \
     --save_steps 500 \
-    --logging_steps 50
+    --logging_steps 1
 
+    # --is_general_preference \
 echo "Training finished."
