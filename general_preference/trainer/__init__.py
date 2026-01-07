@@ -1,1 +1,2 @@
 from .rm_trainer_general_preference import GeneralPreferenceRewardTrainer
+from .rm_trainer_grouped import GroupedPreferenceRewardTrainer
