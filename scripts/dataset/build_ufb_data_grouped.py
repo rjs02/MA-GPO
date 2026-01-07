@@ -415,3 +415,14 @@ if __name__ == "__main__":
         args.include_dimensions = False
 
     main(args)
+
+
+"""
+srun --ntasks=1 --cpus-per-task=16 --time=1:00:00 --mem-per-cpu=8192 --pty bash
+module load stack/2024-06 python_cuda/3.11.6 eth_proxy
+source ../OpenNLHF/.venv/bin/activate
+
+python scripts/dataset/build_ufb_data_grouped.py --output_dir ${LASDIR}/data/ufb
+
+
+"""

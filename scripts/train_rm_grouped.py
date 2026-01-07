@@ -99,12 +99,13 @@ def train(args):
     eval_dataloader = None
     if args.eval_dataset:
         strategy.print(f"Loading grouped eval data from: {args.eval_dataset}")
+        max_eval = args.max_eval_samples if args.max_eval_samples else args.max_samples
         eval_data = blending_datasets(
             args.eval_dataset,
             "1.0",
             strategy,
             args.seed,
-            max_count=args.max_samples,
+            max_count=max_eval,
             stopping_strategy="all_exhausted",
         )
         eval_dataset = GroupedRewardDatasetV2(
@@ -236,6 +237,8 @@ if __name__ == "__main__":
                        help="Path to grouped eval dataset (optional)")
     parser.add_argument("--dataset_probs", type=str, default="1.0")
     parser.add_argument("--max_samples", type=int, default=1000000)
+    parser.add_argument("--max_eval_samples", type=int, default=None,
+                       help="Limit eval samples (default: no limit)")
     parser.add_argument("--max_len", type=int, default=1024)
     parser.add_argument("--max_comparisons_per_entry", type=int, default=None,
                        help="Limit comparisons per entry (None = no limit)")

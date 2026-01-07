@@ -173,9 +173,9 @@ class GroupedPreferenceRewardTrainer(ABC):
         Key optimization: compute embeddings ONCE for all responses,
         then index into them for pairwise comparisons.
         """
-        # Get batch data
-        input_ids = batch["input_ids"].squeeze(1).to(torch.cuda.current_device())
-        attention_mask = batch["attention_mask"].squeeze(1).to(torch.cuda.current_device())
+        # Get batch data - already [total_responses, seq_len] from collate_fn
+        input_ids = batch["input_ids"].to(torch.cuda.current_device())
+        attention_mask = batch["attention_mask"].to(torch.cuda.current_device())
         chosen_indices = batch["chosen_indices"].to(torch.cuda.current_device())
         rejected_indices = batch["rejected_indices"].to(torch.cuda.current_device())
         margins = batch["margins"].to(torch.cuda.current_device())
@@ -225,8 +225,8 @@ class GroupedPreferenceRewardTrainer(ABC):
             total_comparisons = 0
 
             for batch in eval_dataloader:
-                input_ids = batch["input_ids"].squeeze(1).to(torch.cuda.current_device())
-                attention_mask = batch["attention_mask"].squeeze(1).to(torch.cuda.current_device())
+                input_ids = batch["input_ids"].to(torch.cuda.current_device())
+                attention_mask = batch["attention_mask"].to(torch.cuda.current_device())
                 chosen_indices = batch["chosen_indices"].to(torch.cuda.current_device())
                 rejected_indices = batch["rejected_indices"].to(torch.cuda.current_device())
                 margins = batch["margins"].to(torch.cuda.current_device())

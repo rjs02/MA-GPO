@@ -310,10 +310,12 @@ class GroupedRewardDatasetV2(Dataset):
             tokens["input_ids"][0][-1] = self.tokenizer.eos_token_id
             tokens["attention_mask"][0][-1] = True
 
-            all_ids.append(tokens["input_ids"])
-            all_masks.append(tokens["attention_mask"])
+            # Squeeze out the batch dimension from tokenizer output [1, seq_len] -> [seq_len]
+            all_ids.append(tokens["input_ids"].squeeze(0))
+            all_masks.append(tokens["attention_mask"].squeeze(0))
 
-        # Pad to same length within this entry
+        # Pad to same length within this entry - now inputs are [seq_len] each
+        # zero_pad_sequences will stack them to [num_responses, seq_len]
         all_ids = zero_pad_sequences(all_ids, value=self.tokenizer.pad_token_id)
         all_masks = zero_pad_sequences(all_masks)
 
@@ -334,53 +336,45 @@ class GroupedRewardDatasetV2(Dataset):
 
     def collate_fn(self, batch):
         """
-        Simple collate for batch_size=1 (single entry).
-        For batch_size > 1, we'd need to handle variable sizes.
-        """
-        if len(batch) == 1:
-            item = batch[0]
-            return {
-                "input_ids": item["input_ids"],
-                "attention_mask": item["attention_mask"],
-                "chosen_indices": item["chosen_indices"],
-                "rejected_indices": item["rejected_indices"],
-                "margins": item["margins"],
-                "num_responses": item["num_responses"],
-                "num_comparisons": item["num_comparisons"],
-            }
+        Collate function that handles variable sequence lengths across entries.
 
-        # For batch_size > 1, flatten everything
-        all_ids = []
-        all_masks = []
+        Each entry has input_ids of shape [num_responses, seq_len], but seq_len
+        can vary between entries. We flatten all responses and use zero_pad_sequences.
+        """
+        # Flatten all response tensors across all entries
+        # and track indices for comparisons
+        all_ids_list = []
+        all_masks_list = []
         all_chosen = []
         all_rejected = []
         all_margins = []
         offset = 0
 
         for item in batch:
-            all_ids.append(item["input_ids"])
-            all_masks.append(item["attention_mask"])
+            ids = item["input_ids"]        # [num_responses, seq_len]
+            masks = item["attention_mask"]  # [num_responses, seq_len]
+            num_responses = item["num_responses"]
+
+            # Split into individual response tensors (1D each)
+            for i in range(num_responses):
+                all_ids_list.append(ids[i])      # [seq_len]
+                all_masks_list.append(masks[i])  # [seq_len]
+
+            # Adjust comparison indices by offset
             all_chosen.append(item["chosen_indices"] + offset)
             all_rejected.append(item["rejected_indices"] + offset)
             all_margins.append(item["margins"])
-            offset += item["num_responses"]
 
-        # Pad across batch
-        max_seq_len = max(ids.size(1) for ids in all_ids)
-        padded_ids = []
-        padded_masks = []
+            offset += num_responses
 
-        for ids, masks in zip(all_ids, all_masks):
-            if ids.size(1) < max_seq_len:
-                pad_size = max_seq_len - ids.size(1)
-                ids = torch.nn.functional.pad(ids, (pad_size, 0), value=self.tokenizer.pad_token_id)
-                masks = torch.nn.functional.pad(masks, (pad_size, 0), value=0)
-            padded_ids.append(ids)
-            padded_masks.append(masks)
+        # Use zero_pad_sequences to handle padding (left-pads by default)
+        # Input: list of [seq_len] tensors -> Output: [total_responses, max_seq_len]
+        padded_ids = zero_pad_sequences(all_ids_list, value=self.tokenizer.pad_token_id)
+        padded_masks = zero_pad_sequences(all_masks_list, value=0)
 
         return {
-            "input_ids": torch.cat(padded_ids, dim=0),
-            "attention_mask": torch.cat(padded_masks, dim=0),
+            "input_ids": padded_ids,
+            "attention_mask": padded_masks,
             "chosen_indices": torch.cat(all_chosen, dim=0),
             "rejected_indices": torch.cat(all_rejected, dim=0),
             "margins": torch.cat(all_margins, dim=0),

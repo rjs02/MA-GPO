@@ -3,7 +3,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus=rtx_4090:2
 #SBATCH --gres=gpumem:23872m
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 #SBATCH --mem-per-cpu=4096
 #SBATCH --job-name=train_gpm_grouped
 #SBATCH --mail-type=BEGIN,END
@@ -22,7 +22,7 @@
 #
 # REQUIREMENTS:
 # 1. First build grouped data:
-#    python context/build_ufb_data_grouped.py --output_dir $LASDIR/data/ufb_grouped
+#    python scripts/dataset/build_ufb_data_grouped.py --output_dir $LASDIR/data/ufb
 #
 # 2. Then run this training script
 
@@ -48,22 +48,25 @@ export WANDB_CACHE_DIR="$SCRATCH_DIR/wandb/cache"
 MODEL="Qwen/Qwen3-0.6B"
 
 # IMPORTANT: Use grouped data format from build_ufb_data_grouped.py
-DATASET_PATH="${LASDIR}/data/ufb_grouped/pref_grouped_train"
-EVAL_DATASET_PATH="${LASDIR}/data/ufb_grouped/pref_grouped_val"
+DATASET_PATH="${LASDIR}/data/ufb/pref_grouped_train"
+EVAL_DATASET_PATH="${LASDIR}/data/ufb/pref_grouped_val"
+# DATASET_PATH="./data/ufb/cyclic_m2/Cyclic_1"
+# EVAL_DATASET_PATH="./data/ufb/cyclic_m2/Cyclic_1"
 
 # GPM-specific settings
 VALUE_HEAD_DIM=6        # Higher dims (6, 8) capture more complex intransitive preferences
 TAU=0.1                 # Temperature for preference scaling
-LR=2e-5
+LR=1e-6
 EPOCHS=2
 
 # For grouped format, batch_size=1 at entry level is typical
 # since each entry already contains multiple responses (e.g., 4)
 # Effective batch size comes from gradient accumulation
-MICRO_BATCH_SIZE=1
-ACCUMULATED_GRADIENT=64  # Adjust based on memory
+MICRO_BATCH_SIZE=4
+ACCUMULATED_GRADIENT=1  # Adjust based on memory
 
-export EXP_NAME="qwen3-0.6b-gpm-grouped-dim${VALUE_HEAD_DIM}-ufb"
+DATE=$(date +%Y%m%d_%H%M%S)
+export EXP_NAME="qwen3-0.6b-gpm-grouped-dim${VALUE_HEAD_DIM}-ufb-${DATE}"
 export SAVE_PATH="$SCRATCH_DIR/experiments/$EXP_NAME"
 
 export TRITON_CACHE_DIR="${SCRATCH_DIR}/.triton/autotune"
@@ -90,13 +93,13 @@ deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_grouped.py \
     --pretrain $MODEL \
     --dataset $DATASET_PATH \
     --eval_dataset $EVAL_DATASET_PATH \
+    --max_eval_samples 128 \
     --save_path $SAVE_PATH \
     --max_epochs $EPOCHS \
     --micro_train_batch_size $MICRO_BATCH_SIZE \
     --accumulated_gradient $ACCUMULATED_GRADIENT \
-    --max_samples 50000 \
     --learning_rate $LR \
-    --max_len 1024 \
+    --max_len 2048 \
     --zero_stage 2 \
     --bf16 \
     --flash_attn \
@@ -104,14 +107,12 @@ deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_grouped.py \
     --value_head_dim $VALUE_HEAD_DIM \
     --general_preference_tau $TAU \
     --gradient_checkpointing \
-    --margin_loss \
     --use_wandb "rjs02-eth-z-rich" \
-    --wandb_project "GPM-Grouped" \
+    --wandb_project "GPO PM" \
     --wandb_org "rjs02-eth-z-rich" \
-    --wandb_run_name "${EXP_NAME}_$(date +%Y%m%d_%H%M%S)" \
+    --wandb_run_name "${EXP_NAME}" \
     --eval_steps 100 \
     --save_steps 500 \
-    --logging_steps 10 \
-    --save_best_model 3
+    --logging_steps 50 \
 
 echo "Training finished."
