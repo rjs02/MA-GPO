@@ -54,7 +54,7 @@ EVAL_DATASET_PATH="${LASDIR}/data/ufb/pref_grouped_val"
 # EVAL_DATASET_PATH="./data/ufb/cyclic_m2/Cyclic_1"
 
 # GPM-specific settings
-VALUE_HEAD_DIM=6        # Higher dims (6, 8) capture more complex intransitive preferences
+VALUE_HEAD_DIM=1        # Higher dims (6, 8) capture more complex intransitive preferences
 TAU=0.1                 # Temperature for preference scaling
 LR=1e-6
 EPOCHS=2
@@ -103,7 +103,6 @@ deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_grouped.py \
     --zero_stage 2 \
     --bf16 \
     --flash_attn \
-    --is_general_preference \
     --value_head_dim $VALUE_HEAD_DIM \
     --general_preference_tau $TAU \
     --gradient_checkpointing \

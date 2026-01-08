@@ -192,6 +192,7 @@ def train(args):
     strategy.print(f"Max epochs: {args.max_epochs}")
     strategy.print(f"Steps per epoch: {num_update_steps_per_epoch}")
     strategy.print(f"Total steps: {max_steps}")
+    strategy.print(f"Model type: {'GPM' if args.is_general_preference else 'Bradley-Terry'}")
     strategy.print(f"Value head dim: {args.value_head_dim}")
     strategy.print(f"Margin loss: {args.margin_loss}")
 
@@ -207,6 +208,7 @@ def train(args):
         max_epochs=args.max_epochs,
         tau=args.general_preference_tau,
         value_head_dim=args.value_head_dim,
+        is_general_preference=args.is_general_preference,
     )
 
     trainer.fit(args)
@@ -222,8 +224,8 @@ if __name__ == "__main__":
 
     # Model arguments
     parser.add_argument("--pretrain", type=str, default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--is_general_preference", action="store_true", default=True,
-                       help="Use GPM (General Preference Model). Default: True")
+    parser.add_argument("--is_general_preference", action="store_true", default=False,
+                       help="Use GPM (General Preference Model). Default: False (Bradley-Terry)")
     parser.add_argument("--value_head_dim", type=int, default=6,
                        help="Dimension of GPM value head (must be even)")
     parser.add_argument("--general_preference_tau", type=float, default=0.1,

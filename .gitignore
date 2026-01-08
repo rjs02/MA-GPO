@@ -42,6 +42,6 @@ dist/
 *.eggs/
 
 slurm*
-
+data/
 
 

@@ -15,6 +15,7 @@ from tqdm import tqdm
 import deepspeed
 
 from general_preference.models import (
+    PairWiseLoss,
     GeneralPreferenceLoss,
     HighDimGeneralPreferenceLoss,
     HighDimGeneralPreferenceRegressionLoss,
@@ -59,6 +60,7 @@ class GroupedPreferenceRewardTrainer(ABC):
         max_epochs: int = 2,
         tau: float = 0.1,
         value_head_dim: int = 2,
+        is_general_preference: bool = False,
     ) -> None:
         super().__init__()
         self.strategy = strategy
@@ -71,11 +73,16 @@ class GroupedPreferenceRewardTrainer(ABC):
         self.tokenizer = tokenizer
         self.args = strategy.args
         self.value_head_dim = value_head_dim
+        self.is_general_preference = is_general_preference
 
-        # Initialize loss function for GPM
-        if value_head_dim == 2 and not getattr(self.args, 'add_prompt_head', False):
+        # Initialize loss function
+        if not is_general_preference:
+            # Bradley-Terry model: scalar reward, pairwise loss
+            self.loss_fn = PairWiseLoss(tau)
+            self.strategy.print(f"Using PairWiseLoss (Bradley-Terry, dim={value_head_dim})")
+        elif value_head_dim == 2 and not getattr(self.args, 'add_prompt_head', False):
             self.loss_fn = GeneralPreferenceLoss(tau)
-            self.strategy.print("Using GeneralPreferenceLoss (dim=2)")
+            self.strategy.print("Using GeneralPreferenceLoss (GPM, dim=2)")
         else:
             assert value_head_dim % 2 == 0, "value_head_dim must be even for GPM!"
             if getattr(self.args, 'add_prompt_head', False):
@@ -84,10 +91,10 @@ class GroupedPreferenceRewardTrainer(ABC):
                     value_head_dim=value_head_dim,
                     softmax_tau=tau
                 )
-                self.strategy.print(f"Using HighDimGeneralPreferenceMoELoss (dim={value_head_dim})")
+                self.strategy.print(f"Using HighDimGeneralPreferenceMoELoss (GPM, dim={value_head_dim})")
             else:
                 self.loss_fn = HighDimGeneralPreferenceLoss(tau, value_head_dim)
-                self.strategy.print(f"Using HighDimGeneralPreferenceLoss (dim={value_head_dim})")
+                self.strategy.print(f"Using HighDimGeneralPreferenceLoss (GPM, dim={value_head_dim})")
 
         self.ptx_loss_fn = SFTSumLoss(getattr(self.args, 'reward_scaler_beta', 0.1))
 

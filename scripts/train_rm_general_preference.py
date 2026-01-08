@@ -44,20 +44,58 @@ def train(args):
     optim = strategy.create_optimizer(model, lr=args.learning_rate, betas=(0.9, 0.95), weight_decay=args.l2)
 
     # prepare for data and dataset
-    total_data = blending_datasets(
+    strategy.print(f"\nLoading training data from: {args.dataset}")
+    train_data = blending_datasets(
         args.dataset,
         args.dataset_probs,
         strategy,
         args.seed,
-        max_count=5000000,
+        max_count=args.max_samples,
         stopping_strategy="all_exhausted"
     )
-    if args.train_split_ratio < 1:
-        total_data_lengh = min(args.max_samples, len(total_data))
-        train_data = total_data.select(range(int(total_data_lengh * args.train_split_ratio)))
-        eval_data = total_data.select(range(int(total_data_lengh * args.train_split_ratio), total_data_lengh))
+    
+    train_dataset = GeneralRewardDataset(train_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
+    train_dataloader = strategy.setup_dataloader(
+        train_dataset,
+        args.micro_train_batch_size,
+        True,
+        True,
+        train_dataset.collate_fn,
+        group_size=args.group_size,
+    )
+    
+    # Evaluation dataset (optional)
+    eval_dataloader = None
+    if args.eval_dataset:
+        strategy.print(f"Loading eval data from: {args.eval_dataset}")
+        max_eval = args.max_eval_samples if args.max_eval_samples else args.max_samples
+        eval_data = blending_datasets(
+            args.eval_dataset,
+            "1.0",
+            strategy,
+            args.seed,
+            max_count=max_eval,
+            stopping_strategy="all_exhausted",
+        )
+        eval_dataset = GeneralRewardDataset(eval_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
+        eval_dataloader = strategy.setup_dataloader(
+            eval_dataset, args.micro_train_batch_size, True, False, eval_dataset.collate_fn
+        )
+    elif args.train_split_ratio < 1:
+        # Split training data for validation
+        strategy.print(f"Using {1 - args.train_split_ratio:.0%} of training data for validation")
+        total_data_lengh = len(train_data)
+        train_len = int(total_data_lengh * args.train_split_ratio)
         
-        train_dataset = GeneralRewardDataset(train_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
+        train_data_split = train_data.select(range(train_len))
+        eval_start = train_len
+        eval_end = total_data_lengh
+        # Limit eval samples if max_eval_samples is specified
+        max_eval = args.max_eval_samples if args.max_eval_samples else (eval_end - eval_start)
+        eval_end = min(eval_start + max_eval, eval_end)
+        eval_data_split = train_data.select(range(eval_start, eval_end))
+        
+        train_dataset = GeneralRewardDataset(train_data_split, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
         train_dataloader = strategy.setup_dataloader(
             train_dataset,
             args.micro_train_batch_size,
@@ -66,25 +104,15 @@ def train(args):
             train_dataset.collate_fn,
             group_size=args.group_size,
         )
-        if len(eval_data) != 0:
-            eval_dataset = GeneralRewardDataset(eval_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
+        
+        if len(eval_data_split) > 0:
+            eval_dataset = GeneralRewardDataset(eval_data_split, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
             eval_dataloader = strategy.setup_dataloader(
                 eval_dataset, args.micro_train_batch_size, True, False, eval_dataset.collate_fn
             )
         else:
-            eval_dataloader=None
-            strategy.print("No separate validation data split was detected. The entire dataset will be utilized for training.")
+            strategy.print("No validation data available from split.")
     else:
-        train_dataset = GeneralRewardDataset(total_data, tokenizer, args.max_len, strategy, is_custom=args.is_custom_dataset, return_prompt_length=args.return_prompt_length, use_separate_prompt=args.use_separate_prompt)
-        train_dataloader = strategy.setup_dataloader(
-            train_dataset,
-            args.micro_train_batch_size,
-            True,
-            True,
-            train_dataset.collate_fn,
-            group_size=args.group_size,
-        )
-        eval_dataloader=None
         strategy.print("No separate validation data split was detected. The entire dataset will be utilized for training.")
         
     # scheduler
@@ -138,6 +166,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pretrain", type=str, default="google/gemma-2b")
     parser.add_argument("--dataset", type=str, default="../data/test_data/test_data.jsonl")
+    parser.add_argument("--eval_dataset", type=str, default=None, help="Path to eval dataset (optional)")
     parser.add_argument("--dataset_probs", type=str, default="1.0", help="sampling probs for datasets")
     parser.add_argument("--save_path", type=str, default="../results/saved_model")
     parser.add_argument("--save_steps", type=int, default=-1)
@@ -150,6 +179,7 @@ if __name__ == "__main__":
     parser.add_argument("--micro_train_batch_size", type=int, default=8)
     parser.add_argument("--accumulated_gradient", type=int, default=1)
     parser.add_argument("--max_samples", type=int, default=1000000)
+    parser.add_argument("--max_eval_samples", type=int, default=None, help="Limit eval samples (default: no limit)")
     parser.add_argument("--load_checkpoint", action="store_true", default=False)
     parser.add_argument("--max_norm", type=float, default=1.0)
     parser.add_argument("--max_len", type=int, default=512)
@@ -187,7 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_best_model", type=int, default=None, help="Save the top N models with the lowest evaluation loss.")
     parser.add_argument("--add_pretrain_loss", action="store_true", default=False, help="Include the pretraining loss of chosen inputs in the total loss calculation.")
     parser.add_argument("--ptx_loss_coef", type=float, default=0.1, help="coefficient for pretraining loss included in the total loss.")
-    parser.add_argument("--train_split_ratio", type=float, default=1, help="Ratio of the dataset to use for training. (1-train_split_ratio) for validation. Should not exceed 1.")
+    parser.add_argument("--train_split_ratio", type=float, default=1.0, help="Ratio for train/val split if no eval_dataset provided")
     parser.add_argument("--reward_scaler_beta", type=float, default=2.0, help="A constant that controls the scaling of the reward difference.")
     parser.add_argument("--reward_margin", type=float, default=1.0, help="Chosen response exceeds rejected reward by at least reward_margin. A hyperparameter for DPORefFree Loss.")
     parser.add_argument("--regression_target_margin", type=float, default=10.0, help="Target regression margin. A hyperparameter for Regression Loss.")
