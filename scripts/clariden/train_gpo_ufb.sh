@@ -14,12 +14,23 @@ set -euxo pipefail
 
 # === Configuration ===
 
-# Model
-SFT_MODEL="${SFT_MODEL:-/capstor/scratch/cscs/rosieber/MA/runs/sft/qwen3-8b-*/checkpoints}"
+# Model - expand glob pattern if needed
+# SFT_MODEL_PATTERN="${SFT_MODEL:-/capstor/scratch/cscs/rosieber/MA/runs/sft/qwen3-8b-*/checkpoints}"
+# # Expand glob and take the first match (or keep as-is if no glob)
+# if [[ "$SFT_MODEL_PATTERN" == *"*"* ]]; then
+#     SFT_MODEL=$(ls -d $SFT_MODEL_PATTERN 2>/dev/null | head -1)
+#     if [ -z "$SFT_MODEL" ]; then
+#         echo "ERROR: No model found matching pattern: $SFT_MODEL_PATTERN"
+#         exit 1
+#     fi
+# else
+#     SFT_MODEL="$SFT_MODEL_PATTERN"
+# fi
+SFT_MODEL="/capstor/scratch/cscs/rosieber/MA/runs/sft/qwen3-8b-20260119_192554_1396836/checkpoints"
 
 # Data paths (experiment-aware directory structure)
 # These should match the parameters used in prepare_ultrafeedback.py
-NOISE_RATIO="${NOISE_RATIO:-0.500000}"
+NOISE_RATIO="${NOISE_RATIO:-1.000000}"
 ANTI_LENGTH_FRAC="${ANTI_LENGTH_FRAC:-0.500000}"
 DATA_DIR="${MA_SCRATCH_IOPS}/data/argilla_ufb_pref/noise_${NOISE_RATIO}_antilen_${ANTI_LENGTH_FRAC}"
 TRAIN_DATA="${DATA_DIR}/train.jsonl"
@@ -33,8 +44,9 @@ mkdir -p "${OUTPUT_DIR}"/{checkpoints,logs}
 
 # Batch config (4x GH200)
 # Effective batch: micro * accumulated * world_size = 4 * 4 * 4 = 64
-MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-4}"
-ACCUMULATED_GRADIENT="${ACCUMULATED_GRADIENT:-4}"
+MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-8}"
+ACCUMULATED_GRADIENT="${ACCUMULATED_GRADIENT:-2}"
+EFFECTIVE_BATCH_SIZE="${EFFECTIVE_BATCH_SIZE:-${MICRO_BATCH_SIZE} * ${ACCUMULATED_GRADIENT} * 4}"
 
 # GPO settings
 VALUE_HEAD_DIM="${VALUE_HEAD_DIM:-8}"      # 8-dim for richer preference representation
@@ -43,14 +55,14 @@ TAU="${TAU:-0.1}"                          # General preference temperature
 # Training
 MAX_EPOCHS="${MAX_EPOCHS:-1}"
 LEARNING_RATE="${LEARNING_RATE:-1e-5}"
-MAX_LEN="${MAX_LEN:-2048}"
+MAX_LEN="${MAX_LEN:-3072}"
 
 # Logging
 SAVE_STEPS="${SAVE_STEPS:-100}"
 LOGGING_STEPS="${LOGGING_STEPS:-5}"
 EVAL_STEPS="${EVAL_STEPS:-50}"
 WANDB_PROJECT="${WANDB_PROJECT:-GPO-UltraFeedback}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-gpo_noise${NOISE_RATIO}_antilen${ANTI_LENGTH_FRAC}_${DATE}}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-dim${VALUE_HEAD_DIM}_lr${LEARNING_RATE}_bs${EFFECTIVE_BATCH_SIZE}_gpo_noise${NOISE_RATIO}_antilen${ANTI_LENGTH_FRAC}_${DATE}}"
 
 # === Setup ===
 echo "=== GPO Training: UltraFeedback with Anti-Length Augmentation ==="
@@ -104,7 +116,10 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 echo "NCCL: Configured for GH200/Alps (LL128 disabled, Libfabric enabled)"
 
 # === Training ===
-cd "${MA_HOME:-/users/rosieber/MA}/Zhang-GPO"
+cd "${MA_HOME:-/users/rosieber/MA}/MA-GPO"
+
+# Add project root to PYTHONPATH so general_preference module can be found
+export PYTHONPATH="${PWD}:${PYTHONPATH:-}"
 
 deepspeed --num_gpus 4 scripts/train_rm_general_preference.py \
     --pretrain "${SFT_MODEL}" \

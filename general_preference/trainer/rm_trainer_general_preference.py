@@ -137,12 +137,13 @@ class GeneralPreferenceRewardTrainer(ABC):
             self.model.train()
             loss_mean = 0
            
-            for chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len in self.train_dataloader:
+            for chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len, rejected_response_len in self.train_dataloader:
                 chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
                 r_mask = r_mask.squeeze(1).to(torch.cuda.current_device())
-                chosen_response_len = torch.tensor(chosen_response_len).view(-1, 1).to(torch.cuda.current_device())
+                chosen_response_len_tensor = torch.tensor(chosen_response_len).view(-1, 1).to(torch.cuda.current_device())
+                rejected_response_len_tensor = torch.tensor(rejected_response_len).view(-1, 1).to(torch.cuda.current_device())
                 
                 if self.margin_loss:
                     margin = torch.tensor(margin).to(torch.cuda.current_device())
@@ -160,7 +161,7 @@ class GeneralPreferenceRewardTrainer(ABC):
 
                 if isinstance(self.loss_fn, HighDimGeneralPreferenceRegressionMoELoss) or isinstance(self.loss_fn, HighDimGeneralPreferenceMoELoss):
                     chosen_last_hidden_states = outputs["last_hidden_state"][: chosen_ids.shape[0], :, :]
-                    prompt_end_index = chosen_last_hidden_states.size(1) - chosen_response_len - 1
+                    prompt_end_index = chosen_last_hidden_states.size(1) - chosen_response_len_tensor - 1
                     prompt_end_index_expanded = prompt_end_index.unsqueeze(-1).expand(-1, -1, chosen_last_hidden_states.size(-1))
                     prompt_hidden_state = torch.gather(chosen_last_hidden_states, dim=1, index=prompt_end_index_expanded).squeeze(1)
                     preference_loss, prob = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state.to(torch.cuda.current_device()), margin)
@@ -205,10 +206,22 @@ class GeneralPreferenceRewardTrainer(ABC):
                 
                 loss_mean = loss_mean * 0.9 + 0.1 * preference_loss.item()
                 
+                # Compute response length statistics for the batch
+                chosen_len_batch = chosen_response_len_tensor.float()
+                rejected_len_batch = rejected_response_len_tensor.float()
+
+                # Get current learning rate
+                current_lr = self.scheduler.get_last_lr()[0]
+
                 logs_dict = {
                     "preference_loss": preference_loss.item(),
                     "prob": prob.item(),
                     "loss_mean": loss_mean,
+                    "lr": current_lr,
+                    "chosen_response_len_avg": chosen_len_batch.mean().item(),
+                    "rejected_response_len_avg": rejected_len_batch.mean().item(),
+                    "chosen_response_len_std": chosen_len_batch.std().item() if chosen_len_batch.numel() > 1 else 0.0,
+                    "rejected_response_len_std": rejected_len_batch.std().item() if rejected_len_batch.numel() > 1 else 0.0,
                 }
                     
                 # logs/checkpoints/evaluate
@@ -292,7 +305,7 @@ class GeneralPreferenceRewardTrainer(ABC):
         with torch.no_grad():
             loss_sum = 0
             prob_sum = 0
-            for chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len in eval_dataloader:
+            for chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len, rejected_response_len in eval_dataloader:
                 chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
@@ -301,7 +314,8 @@ class GeneralPreferenceRewardTrainer(ABC):
                     margin = torch.tensor(margin).to(torch.cuda.current_device())
                 else:
                     margin = None
-                chosen_response_len = torch.tensor(chosen_response_len).view(-1, 1).to(torch.cuda.current_device())
+                chosen_response_len_tensor = torch.tensor(chosen_response_len).view(-1, 1).to(torch.cuda.current_device())
+                rejected_response_len_tensor = torch.tensor(rejected_response_len).view(-1, 1).to(torch.cuda.current_device())
 
                 return_output = True if isinstance(self.loss_fn, HighDimGeneralPreferenceRegressionMoELoss) else False
                 chosen_reward, reject_reward, outputs = self.concatenated_forward(
@@ -310,7 +324,7 @@ class GeneralPreferenceRewardTrainer(ABC):
                 
                 if isinstance(self.loss_fn, HighDimGeneralPreferenceRegressionMoELoss):
                     chosen_last_hidden_states = outputs["last_hidden_state"][: chosen_ids.shape[0], :, :]
-                    prompt_len = chosen_last_hidden_states.size(1) - chosen_response_len
+                    prompt_len = chosen_last_hidden_states.size(1) - chosen_response_len_tensor
                     prompt_len_expanded = prompt_len.unsqueeze(-1).expand(-1, -1, chosen_last_hidden_states.size(-1))
                     prompt_hidden_state = torch.gather(chosen_last_hidden_states, dim=1, index=prompt_len_expanded).squeeze(1)
                     preference_loss, prob = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state, margin)

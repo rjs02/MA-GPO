@@ -136,9 +136,12 @@ class GeneralRewardDataset(Dataset):
             # if not self.is_custom and self.tokenizer.chat_template is not None and self.tokenizer.bos_token_id == 128000:
             #     prompt_token["input_ids"] = prompt_token["input_ids"][:, 1:]
             #     prompt_token["attention_mask"] = prompt_token["attention_mask"][:, 1:]
-            chosen_response_len = chosen_token["attention_mask"].sum() - prompt_token["attention_mask"].sum()
+            prompt_len = prompt_token["attention_mask"].sum()
+            chosen_response_len = chosen_token["attention_mask"].sum() - prompt_len
+            rejected_response_len = reject_token["attention_mask"].sum() - prompt_len
         else:
             chosen_response_len = 0
+            rejected_response_len = 0
 
         # To avoid EOS_token truncation
         chosen_token["input_ids"][0][-1] = self.tokenizer.eos_token_id
@@ -153,6 +156,7 @@ class GeneralRewardDataset(Dataset):
             reject_token["attention_mask"],
             margin,
             chosen_response_len,
+            rejected_response_len,
         )
 
     def collate_fn(self, item_list):
@@ -162,18 +166,20 @@ class GeneralRewardDataset(Dataset):
         reject_masks = []
         margins = []
         chosen_response_lens = []
+        rejected_response_lens = []
 
-        for chosen_id, chosen_mask, reject_id, reject_mask, margin, chosen_response_len in item_list:
+        for chosen_id, chosen_mask, reject_id, reject_mask, margin, chosen_response_len, rejected_response_len in item_list:
             chosen_ids.append(chosen_id)
             chosen_masks.append(chosen_mask)
             reject_ids.append(reject_id)
             reject_masks.append(reject_mask)
             margins.append(margin)
             chosen_response_lens.append(chosen_response_len)
+            rejected_response_lens.append(rejected_response_len)
 
         chosen_ids = zero_pad_sequences(chosen_ids, value=self.tokenizer.pad_token_id)
         chosen_masks = zero_pad_sequences(chosen_masks)
         reject_ids = zero_pad_sequences(reject_ids, value=self.tokenizer.pad_token_id)
         reject_masks = zero_pad_sequences(reject_masks)
 
-        return chosen_ids, chosen_masks, reject_ids, reject_masks, margins, chosen_response_lens
+        return chosen_ids, chosen_masks, reject_ids, reject_masks, margins, chosen_response_lens, rejected_response_lens
