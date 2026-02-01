@@ -1,14 +1,17 @@
 #!/bin/bash
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus=rtx_4090:2
+#SBATCH --gpus=rtx_4090:4
 #SBATCH --gres=gpumem:23872m
 #SBATCH --time=24:00:00
-#SBATCH --mem-per-cpu=8192
-#SBATCH --job-name=train_gpm_hh
+#SBATCH --mem-per-cpu=16384
+#SBATCH --job-name=train_gpm_hh_4b_4gpu_offload
 #SBATCH --mail-type=BEGIN,END
 
 # Training script for GPM on Anthropic/hh-rlhf dataset
+# Using 4x RTX 4090 GPUs with DeepSpeed ZeRO-3 + OPTIMIZER OFFLOADING
+# Effective batch size: 128
+# Optimizer offloading: Reduces GPU memory by ~8GB per GPU, adds ~15-20% training time
 
 
 # --- Environment Setup ---
@@ -39,17 +42,18 @@ DATASET_PATH="$LASDIR/data/hh_rlhf/train"
 EVAL_DATASET_PATH="$LASDIR/data/hh_rlhf/test"
 
 # GPM-specific settings
-VALUE_HEAD_DIM=6        # Higher dims (6, 8) capture more complex intransitive preferences
-TAU=0.1                 # Temperature for preference scaling
-LR=1e-6
-EPOCHS=1
-MICRO_BATCH_SIZE=2      # Per-GPU batch size (reduced from 4 for 4B model)
-ACCUMULATED_GRADIENT=16  # Gradient accumulation steps (increased to maintain effective batch size)
-# Effective batch size = MICRO_BATCH_SIZE * ACCUMULATED_GRADIENT * num_gpus = 2 * 16 * 2 = 64
+VALUE_HEAD_DIM=${VALUE_HEAD_DIM:-6}        # Higher dims (6, 8) capture more complex intransitive preferences
+TAU=${TAU:-0.1}                 # Temperature for preference scaling
+LR=${LR:-1e-5}
+EPOCHS=${EPOCHS:-2}
+NUM_GPUS=${NUM_GPUS:-4}              # Number of GPUs
+MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-8}      # Per-GPU batch size
+ACCUMULATED_GRADIENT=${ACCUMULATED_GRADIENT:-2} # Gradient accumulation steps
+# Effective batch size = MICRO_BATCH_SIZE * ACCUMULATED_GRADIENT * NUM_GPUS = 2 * 16 * 4 = 128
 
 DATE=$(date +%Y%m%d_%H%M%S)
 
-export EXP_NAME="qwen3-4b-gpm-dim${VALUE_HEAD_DIM}-hh-rlhf-${DATE}"
+EXP_NAME=${EXP_NAME:-"qwen3-4b-gpm-dim${VALUE_HEAD_DIM}-hh-rlhf-4gpu-offload-${DATE}"}
 export SAVE_PATH="$SCRATCH_DIR/experiments/$EXP_NAME"
 
 export TRITON_CACHE_DIR="${SCRATCH_DIR}/.triton/autotune"
@@ -61,12 +65,16 @@ echo "Model: $MODEL"
 echo "Value Head Dim: $VALUE_HEAD_DIM"
 echo "Dataset: $DATASET_PATH"
 echo "Output Dir: $SAVE_PATH"
+echo "Number of GPUs: $NUM_GPUS"
+echo "Micro Batch Size: $MICRO_BATCH_SIZE"
+echo "Gradient Accumulation: $ACCUMULATED_GRADIENT"
+echo "Effective Batch Size: $(($MICRO_BATCH_SIZE * $ACCUMULATED_GRADIENT * $NUM_GPUS))"
 
 # Find a free port
 export MASTER_PORT=$(python -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.bind(('', 0)); print(s.getsockname()[1]); s.close()")
 echo "Using MASTER_PORT=$MASTER_PORT"
 
-deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_general_preference.py \
+deepspeed --master_port $MASTER_PORT --num_gpus=$NUM_GPUS scripts/train_rm_general_preference.py \
     --pretrain $MODEL \
     --dataset $DATASET_PATH \
     --eval_dataset $EVAL_DATASET_PATH \
@@ -81,6 +89,7 @@ deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_general_prefe
     --zero_stage 3 \
     --bf16 \
     --flash_attn \
+    --adam_offload \
     --value_head_dim $VALUE_HEAD_DIM \
     --general_preference_tau $TAU \
     --use_separate_prompt \
@@ -89,8 +98,8 @@ deepspeed --master_port $MASTER_PORT --num_gpus=2 scripts/train_rm_general_prefe
     --wandb_project "GPO PM" \
     --wandb_org "rjs02-eth-z-rich" \
     --wandb_run_name "${EXP_NAME}" \
-    --eval_steps 50 \
+    --eval_steps 25 \
     --save_steps 500 \
-    --logging_steps 10
+    --logging_steps 5
 
 echo "Training finished."

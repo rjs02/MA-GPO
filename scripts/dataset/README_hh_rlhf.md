@@ -86,7 +86,7 @@ Or run preprocessing directly:
 source /cluster/home/rosieber/OpenNLHF/.venv/bin/activate
 
 python scripts/dataset/preprocess_hh_rlhf.py \
-    --output_dir "/cluster/scratch/rosieber/MA/data/hh_rlhf"
+    --output_dir ${LASDIR}/data/hh_rlhf
 ```
 
 #### Process Specific Subset
