@@ -135,8 +135,25 @@ def train(args):
     # strategy prepare
     (model, optim, scheduler) = strategy.prepare((model, optim, scheduler))
 
+    # Load checkpoint if resuming
+    consumed_samples = 0
     if args.load_checkpoint:
-        strategy.print("Load checkpoint: ", args.save_path)
+        strategy.print(f"Loading checkpoint from: {args.ckpt_path}")
+        try:
+            _, client_state = strategy.load_ckpt(
+                model,
+                args.ckpt_path,
+                tag=None,  # Will use latest checkpoint
+                load_module_strict=True,
+                load_optimizer_states=True,
+                load_lr_scheduler_states=True,
+            )
+            consumed_samples = client_state.get('consumed_samples', 0)
+            strategy.print(f"✓ Resumed from checkpoint: {consumed_samples} samples completed")
+        except Exception as e:
+            strategy.print(f"✗ Failed to load checkpoint: {e}")
+            strategy.print("Starting training from scratch...")
+            consumed_samples = 0
 
     os.makedirs(args.save_path, exist_ok=True)
 
@@ -156,7 +173,7 @@ def train(args):
         value_head_dim=args.value_head_dim,
     )
 
-    trainer.fit(args)
+    trainer.fit(args, consumed_samples=consumed_samples)
 
     # save model checkpoint after fitting on only rank0
     strategy.save_model(model, tokenizer, args.save_path)

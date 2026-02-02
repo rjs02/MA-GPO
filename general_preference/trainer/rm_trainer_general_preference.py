@@ -113,7 +113,7 @@ class GeneralPreferenceRewardTrainer(ABC):
             wandb.define_metric("eval/global_step")
             wandb.define_metric("eval/*", step_metric="eval/global_step", step_sync=True)
 
-    def fit(self, args):
+    def fit(self, args, consumed_samples=0):
         # get eval and save steps
         if args.eval_steps == -1:
             args.eval_steps = self.train_dataloader.__len__()  # Evaluate once per epoch
@@ -121,9 +121,16 @@ class GeneralPreferenceRewardTrainer(ABC):
             args.save_steps = float("inf")  # do not save ckpt
 
         eval_loss_minimum = None
-        global_step = 1
-        epoch_bar = tqdm(range(self.epochs), desc="Train epoch", disable=not self.strategy.is_rank_0())
-        for epoch in range(self.epochs):
+        # Resume from checkpoint if consumed_samples > 0
+        global_step = consumed_samples + 1
+        start_epoch = consumed_samples // self.train_dataloader.__len__()
+        steps_in_current_epoch = consumed_samples % self.train_dataloader.__len__()
+        
+        if consumed_samples > 0:
+            self.strategy.print(f"Resuming from epoch {start_epoch}, step {steps_in_current_epoch} (global_step={global_step})")
+        
+        epoch_bar = tqdm(range(start_epoch, self.epochs), desc="Train epoch", disable=not self.strategy.is_rank_0())
+        for epoch in range(start_epoch, self.epochs):
             #  train
             step_bar = tqdm(
                 range(self.train_dataloader.__len__()),
@@ -137,7 +144,11 @@ class GeneralPreferenceRewardTrainer(ABC):
             self.model.train()
             loss_mean = 0
            
-            for chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len, rejected_response_len in self.train_dataloader:
+            for step_in_epoch, (chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len, rejected_response_len) in enumerate(self.train_dataloader):
+                # Skip already-trained steps when resuming
+                if epoch == start_epoch and step_in_epoch < steps_in_current_epoch:
+                    continue
+                    
                 chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
                 reject_ids = reject_ids.squeeze(1).to(torch.cuda.current_device())
@@ -277,7 +288,16 @@ class GeneralPreferenceRewardTrainer(ABC):
         # TODO: save best model on dev, use loss/perplexity on whole dev dataset as metric
         if global_step % args.save_steps == 0:
             tag = f"global_step_{global_step}"
-            # self.strategy.save_ckpt(self.model, args.ckpt_path, tag, args.max_ckpt_num, args.max_ckpt_mem)
+            # Save full DeepSpeed checkpoint (for resuming)
+            self.strategy.save_ckpt(
+                self.model, 
+                args.ckpt_path, 
+                tag, 
+                args.max_ckpt_num, 
+                args.max_ckpt_mem,
+                client_state={'consumed_samples': global_step - 1}
+            )
+            # Also save model weights (for easy loading/evaluation)
             self.strategy.save_model(self.model, self.tokenizer, os.path.join(args.save_path, tag))
             
         if self.strategy.is_rank_0():  
