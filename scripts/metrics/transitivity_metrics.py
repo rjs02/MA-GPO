@@ -155,18 +155,20 @@ class TransitivityAnalyzer:
                 "mfas_score": mfas_score,
             }
             
-        # Aggregate statistics
+        # Aggregate statistics (convert numpy types to Python types for JSON serialization)
         results = {
-            "total_pairs": total_pairs,
-            "unique_prompts": len(prompt_groups),
-            "conflict_rate": total_conflicts / total_pairs if total_pairs > 0 else 0.0,
-            "triangle_cycles": total_cycles,
-            "mean_conflict_rate": np.mean(all_conflict_rates) if all_conflict_rates else 0.0,
-            "mean_cycles_per_prompt": np.mean(all_cycle_counts) if all_cycle_counts else 0.0,
-            "mean_loop_ratio_hodge": np.mean([x for x in all_loop_ratios if x > 0]) if all_loop_ratios else 0.0,
-            "mean_spectral_gap": np.mean([x for x in all_spectral_gaps if x > 0]) if all_spectral_gaps else 0.0,
-            "mean_mfas_score": np.mean([x for x in all_mfas_scores if x > 0]) if all_mfas_scores else 0.0,
+            "total_pairs": int(total_pairs),
+            "unique_prompts": int(len(prompt_groups)),
+            "conflict_rate": float(total_conflicts / total_pairs if total_pairs > 0 else 0.0),
+            "triangle_cycles": int(total_cycles),
+            "mean_conflict_rate": float(np.mean(all_conflict_rates) if all_conflict_rates else 0.0),
+            "mean_cycles_per_prompt": float(np.mean(all_cycle_counts) if all_cycle_counts else 0.0),
+            "mean_loop_ratio_hodge": float(np.mean([x for x in all_loop_ratios if x > 0 and not np.isnan(x)]) if all_loop_ratios else 0.0),
+            "mean_spectral_gap": float(np.mean([x for x in all_spectral_gaps if x > 0 and not np.isnan(x)]) if all_spectral_gaps else 0.0),
+            "mean_mfas_score": float(np.mean([x for x in all_mfas_scores if x > 0 and not np.isnan(x)]) if all_mfas_scores else 0.0),
             "per_prompt_stats_sample": dict(list(self.per_prompt_stats.items())[:10]),
+            "prompts_with_multiple_responses": int(sum(1 for stats in self.per_prompt_stats.values() if stats["n_responses"] >= 3)),
+            "prompts_with_conflicts": int(sum(1 for stats in self.per_prompt_stats.values() if stats["conflict_rate"] > 0)),
         }
         
         # Add distributions
@@ -366,7 +368,7 @@ class TransitivityAnalyzer:
         
         # Build directed adjacency (i->j if i preferred over j)
         adj = (pref_matrix > pref_matrix.T).astype(int)
-        total_edges = np.sum(adj)
+        total_edges = int(np.sum(adj))
         
         if total_edges == 0:
             return 0.0
@@ -376,7 +378,12 @@ class TransitivityAnalyzer:
         ordering = []
         removed_edges = 0
         
-        while adj_copy.sum() > 0:
+        max_iterations = n * 2  # Prevent infinite loops
+        iteration = 0
+        
+        while adj_copy.sum() > 0 and iteration < max_iterations:
+            iteration += 1
+            
             # Compute in/out degrees
             in_deg = np.sum(adj_copy, axis=0)
             out_deg = np.sum(adj_copy, axis=1)
@@ -387,9 +394,15 @@ class TransitivityAnalyzer:
             mask = (in_deg + out_deg) > 0
             if not np.any(mask):
                 break
-                
+            
+            # Set infinite for nodes already processed
+            diff = diff.astype(float)
             diff[~mask] = np.inf
-            node = np.argmin(diff)
+            
+            if np.all(np.isinf(diff)):
+                break
+                
+            node = int(np.argmin(diff))
             
             # Add to ordering
             ordering.append(node)

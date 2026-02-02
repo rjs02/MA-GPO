@@ -97,13 +97,42 @@ def main(args):
     for k, v in results['conflict_rate_distribution'].items():
         print(f"  {k}: {v:.4f}")
     
+    print(f"\nDataset Type:")
+    print(f"  Prompts with multiple responses (≥3): {results.get('prompts_with_multiple_responses', 0):,}")
+    print(f"  Prompts with conflicts: {results.get('prompts_with_conflicts', 0):,}")
+    
+    if results.get('prompts_with_multiple_responses', 0) < 100:
+        print("\n⚠️  WARNING: Very few prompts have multiple responses!")
+        print("   This dataset appears to be BINARIZED (only chosen vs rejected per prompt).")
+        print("   For intransitivity analysis, you need the MULTIDIMENSIONAL dataset.")
+        print("\n   Suggested alternatives:")
+        print("   1. Use openbmb/UltraFeedback (not binarized)")
+        print("   2. Use build_ufb_data.py with --averaged=False to get multidimensional pairs")
+        print("   3. Or analyze at the dimension level if your data has 'dimension' field")
+    
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Save results
     results_path = os.path.join(args.output_dir, "transitivity_metrics.json")
     with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
+        # Convert any remaining numpy types
+        import numpy as np
+        def convert_numpy(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(item) for item in obj]
+            return obj
+        
+        results_clean = convert_numpy(results)
+        json.dump(results_clean, f, indent=2)
     print(f"\n✓ Saved metrics to {results_path}")
     
     # Generate visualizations if requested
