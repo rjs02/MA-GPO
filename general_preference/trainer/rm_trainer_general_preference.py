@@ -288,7 +288,9 @@ class GeneralPreferenceRewardTrainer(ABC):
         # TODO: save best model on dev, use loss/perplexity on whole dev dataset as metric
         if global_step % args.save_steps == 0:
             tag = f"global_step_{global_step}"
-            # Save full DeepSpeed checkpoint (for resuming)
+            
+            # Save full DeepSpeed checkpoint (for resuming training with optimizer/scheduler states)
+            # This creates: ckpt_path/tag/mp_rank_00_model_states.pt, etc.
             self.strategy.save_ckpt(
                 self.model, 
                 args.ckpt_path, 
@@ -297,8 +299,24 @@ class GeneralPreferenceRewardTrainer(ABC):
                 args.max_ckpt_mem,
                 client_state={'consumed_samples': global_step - 1}
             )
-            # Also save model weights (for easy loading/evaluation)
-            self.strategy.save_model(self.model, self.tokenizer, os.path.join(args.save_path, tag))
+            
+            # Update 'latest' file to point to the newest checkpoint
+            if self.strategy.is_rank_0():
+                latest_file = os.path.join(args.ckpt_path, "latest")
+                try:
+                    with open(latest_file, 'w') as f:
+                        f.write(tag)
+                    self.strategy.print(f"✓ Updated latest checkpoint pointer: {tag}")
+                except Exception as e:
+                    self.strategy.print(f"⚠️  Warning: Failed to update 'latest' file: {e}")
+            
+            # Also save model weights separately (for easy loading/evaluation)
+            # Only save if save_path is different from ckpt_path
+            if args.save_path != args.ckpt_path:
+                model_save_path = os.path.join(args.save_path, tag)
+                self.strategy.save_model(self.model, self.tokenizer, model_save_path)
+            else:
+                self.strategy.print(f"⚠️  Skipping duplicate model save (save_path == ckpt_path)")
             
         if self.strategy.is_rank_0():  
             return eval_loss_minimum
