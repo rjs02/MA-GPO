@@ -139,21 +139,87 @@ def train(args):
     consumed_samples = 0
     if args.load_checkpoint:
         strategy.print(f"Loading checkpoint from: {args.ckpt_path}")
-        try:
-            _, client_state = strategy.load_ckpt(
-                model,
-                args.ckpt_path,
-                tag=None,  # Will use latest checkpoint
-                load_module_strict=True,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
-            )
-            consumed_samples = client_state.get('consumed_samples', 0)
-            strategy.print(f"✓ Resumed from checkpoint: {consumed_samples} samples completed")
-        except Exception as e:
-            strategy.print(f"✗ Failed to load checkpoint: {e}")
-            strategy.print("Starting training from scratch...")
-            consumed_samples = 0
+        
+        # Determine checkpoint directory and tag
+        ckpt_dir = args.ckpt_path
+        ckpt_tag = None
+        checkpoint_valid = False
+        
+        # Check if path ends with a specific checkpoint tag (e.g., global_step_5700)
+        if os.path.basename(args.ckpt_path).startswith('global_step_'):
+            ckpt_tag = os.path.basename(args.ckpt_path)
+            ckpt_dir = os.path.dirname(args.ckpt_path)
+            strategy.print(f"  → Checkpoint directory: {ckpt_dir}")
+            strategy.print(f"  → Checkpoint tag: {ckpt_tag}")
+            
+            # Check what files exist
+            full_ckpt_path = os.path.join(ckpt_dir, ckpt_tag)
+            if os.path.exists(full_ckpt_path):
+                files = os.listdir(full_ckpt_path)
+                ds_files = [f for f in files if 'model_states' in f or 'optim_states' in f or 'zero' in f.lower()]
+                strategy.print(f"  → Files in checkpoint dir: {len(files)} total")
+                strategy.print(f"  → DeepSpeed checkpoint files: {ds_files if ds_files else 'NONE FOUND'}")
+                
+                if not ds_files:
+                    strategy.print(f"")
+                    strategy.print(f"✗ ERROR: Directory contains model exports but not DeepSpeed checkpoints!")
+                    strategy.print(f"  This directory has .safetensors files but missing DeepSpeed training state.")
+                    strategy.print(f"  Cannot resume training from model-only exports.")
+                    strategy.print(f"  Starting training from scratch...")
+                    consumed_samples = 0
+                    checkpoint_valid = False
+                else:
+                    checkpoint_valid = True
+            else:
+                strategy.print(f"  → WARNING: Checkpoint path does not exist: {full_ckpt_path}")
+                consumed_samples = 0
+                checkpoint_valid = False
+        else:
+            # Try to read 'latest' file to get the tag
+            latest_file = os.path.join(args.ckpt_path, 'latest')
+            if os.path.exists(latest_file):
+                with open(latest_file, 'r') as f:
+                    ckpt_tag = f.read().strip()
+                strategy.print(f"  → Using latest checkpoint: {ckpt_tag}")
+                checkpoint_valid = True
+            else:
+                strategy.print(f"  → No 'latest' file found, DeepSpeed will auto-detect")
+                
+            # Debug: list subdirectories
+            if os.path.exists(args.ckpt_path):
+                subdirs = [d for d in os.listdir(args.ckpt_path) if os.path.isdir(os.path.join(args.ckpt_path, d)) and d.startswith('global_step_')]
+                strategy.print(f"  → Available checkpoints: {sorted(subdirs)[-3:] if subdirs else 'NONE'}")
+                if subdirs:
+                    checkpoint_valid = True
+        
+        if checkpoint_valid:
+            try:
+                load_path, client_state = strategy.load_ckpt(
+                    model,
+                    ckpt_dir,
+                    tag=ckpt_tag,
+                    load_module_strict=True,
+                    load_optimizer_states=True,
+                    load_lr_scheduler_states=True,
+                )
+                
+                if load_path is None:
+                    strategy.print(f"✗ Checkpoint loading returned None - checkpoint may not exist")
+                    strategy.print(f"  → Checked directory: {ckpt_dir}")
+                    strategy.print(f"  → Checked tag: {ckpt_tag}")
+                    strategy.print("Starting training from scratch...")
+                    consumed_samples = 0
+                else:
+                    consumed_samples = client_state.get('consumed_samples', 0) if client_state else 0
+                    strategy.print(f"✓ Resumed from checkpoint: {load_path}")
+                    strategy.print(f"  → Consumed samples: {consumed_samples}")
+            except Exception as e:
+                import traceback
+                strategy.print(f"✗ Failed to load checkpoint: {type(e).__name__}: {e}")
+                strategy.print(f"  → Full traceback:")
+                strategy.print(traceback.format_exc())
+                strategy.print("Starting training from scratch...")
+                consumed_samples = 0
 
     os.makedirs(args.save_path, exist_ok=True)
 

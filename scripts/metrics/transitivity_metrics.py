@@ -68,13 +68,17 @@ class TransitivityAnalyzer:
         # Compute metrics per prompt
         all_conflict_rates = []
         all_cycle_counts = []
+        all_instance_cycle_counts = []
         all_loop_ratios = []
+        all_adjusted_loop_ratios = []
+        all_baseline_loop_ratios = []
         all_spectral_gaps = []
         all_mfas_scores = []
         
         total_pairs = 0
         total_conflicts = 0
         total_cycles = 0
+        total_instance_cycles = 0
         
         iterator = tqdm(prompt_groups.items(), desc="Analyzing prompts") if self.verbose else prompt_groups.items()
         
@@ -97,42 +101,69 @@ class TransitivityAnalyzer:
             n_conflicts = int(conflict_rate * n_pairs)
             total_conflicts += n_conflicts
             
-            # Count cycles
+            # Count cycles (majority-vote aggregated)
+            n_cycles = 0
+            n_instance_cycles = 0
             if n_resp >= 3:
                 n_cycles = self._count_triangles(pref_matrix)
                 all_cycle_counts.append(n_cycles)
                 total_cycles += n_cycles
+                
+                # Count cycles (instance-level)
+                n_instance_cycles = self._count_instance_triangles(pairs, responses)
+                all_instance_cycle_counts.append(n_instance_cycles)
+                total_instance_cycles += n_instance_cycles
             else:
                 all_cycle_counts.append(0)
+                all_instance_cycle_counts.append(0)
                 
-            # Hodge decomposition (if requested and feasible)
-            loop_ratio = 0.0
-            if compute_hodge and n_resp >= 3 and n_resp <= 100:
+            # Hodge decomposition (limit to <=200 for computational efficiency)
+            loop_ratio = np.nan
+            baseline_loop_ratio = np.nan
+            adjusted_loop_ratio = np.nan
+            if compute_hodge and n_resp >= 3 and n_resp <= 200:
                 try:
                     loop_ratio = self._compute_hodge_loop_ratio(pref_matrix)
                     all_loop_ratios.append(loop_ratio)
+                    
+                    # Compute baseline (structural floor due to observation topology)
+                    baseline_loop_ratio = self._compute_transitive_baseline(pref_matrix)
+                    all_baseline_loop_ratios.append(baseline_loop_ratio)
+                    
+                    # Adjusted loop ratio = (observed - baseline) / (1 - baseline)
+                    # This removes the structural baseline and normalizes to [0, 1]
+                    if baseline_loop_ratio < 1.0 - 1e-10:
+                        adjusted_loop_ratio = (loop_ratio - baseline_loop_ratio) / (1.0 - baseline_loop_ratio)
+                        adjusted_loop_ratio = float(np.clip(adjusted_loop_ratio, 0, 1))
+                    else:
+                        adjusted_loop_ratio = 0.0
+                    all_adjusted_loop_ratios.append(adjusted_loop_ratio)
                 except Exception as e:
                     if self.verbose:
                         warnings.warn(f"Hodge computation failed for prompt: {e}")
-                    all_loop_ratios.append(0.0)
+                    all_loop_ratios.append(np.nan)
+                    all_baseline_loop_ratios.append(np.nan)
+                    all_adjusted_loop_ratios.append(np.nan)
             else:
-                all_loop_ratios.append(0.0)
+                all_loop_ratios.append(np.nan)
+                all_baseline_loop_ratios.append(np.nan)
+                all_adjusted_loop_ratios.append(np.nan)
                 
-            # Spectral analysis
-            spectral_gap = 0.0
-            if compute_spectral and n_resp >= 3 and n_resp <= 100:
+            # Spectral analysis (limit to <=200 for computational efficiency)
+            spectral_gap = np.nan
+            if compute_spectral and n_resp >= 3 and n_resp <= 200:
                 try:
                     spectral_gap = self._compute_spectral_gap(pref_matrix)
                     all_spectral_gaps.append(spectral_gap)
                 except Exception as e:
                     if self.verbose:
                         warnings.warn(f"Spectral computation failed: {e}")
-                    all_spectral_gaps.append(0.0)
+                    all_spectral_gaps.append(np.nan)
             else:
-                all_spectral_gaps.append(0.0)
+                all_spectral_gaps.append(np.nan)
                 
             # MFAS score
-            mfas_score = 0.0
+            mfas_score = np.nan
             if compute_mfas and n_resp >= 3:
                 try:
                     mfas_score = self._compute_mfas_score(pref_matrix)
@@ -140,35 +171,66 @@ class TransitivityAnalyzer:
                 except Exception as e:
                     if self.verbose:
                         warnings.warn(f"MFAS computation failed: {e}")
-                    all_mfas_scores.append(0.0)
+                    all_mfas_scores.append(np.nan)
             else:
-                all_mfas_scores.append(0.0)
+                all_mfas_scores.append(np.nan)
                 
             # Store per-prompt stats
             self.per_prompt_stats[prompt[:100]] = {
                 "n_responses": n_resp,
                 "n_pairs": n_pairs,
                 "conflict_rate": conflict_rate,
-                "n_cycles": n_cycles if n_resp >= 3 else 0,
-                "loop_ratio": loop_ratio,
-                "spectral_gap": spectral_gap,
-                "mfas_score": mfas_score,
+                "n_cycles_majority": n_cycles if n_resp >= 3 else 0,
+                "n_cycles_instance": n_instance_cycles if n_resp >= 3 else 0,
+                "loop_ratio": float(loop_ratio) if not np.isnan(loop_ratio) else None,
+                "baseline_loop_ratio": float(baseline_loop_ratio) if not np.isnan(baseline_loop_ratio) else None,
+                "adjusted_loop_ratio": float(adjusted_loop_ratio) if not np.isnan(adjusted_loop_ratio) else None,
+                "spectral_gap": float(spectral_gap) if not np.isnan(spectral_gap) else None,
+                "mfas_score": float(mfas_score) if not np.isnan(mfas_score) else None,
             }
             
+        # Count how many prompts each metric was computed for
+        n_hodge_computed = int(np.sum(~np.isnan(all_loop_ratios)))
+        n_spectral_computed = int(np.sum(~np.isnan(all_spectral_gaps)))
+        n_mfas_computed = int(np.sum(~np.isnan(all_mfas_scores)))
+        
+        # Compute response count distribution
+        response_counts = [stats["n_responses"] for stats in self.per_prompt_stats.values()]
+        response_count_dist = {
+            "min": int(np.min(response_counts)) if response_counts else 0,
+            "25th": int(np.percentile(response_counts, 25)) if response_counts else 0,
+            "median": int(np.median(response_counts)) if response_counts else 0,
+            "75th": int(np.percentile(response_counts, 75)) if response_counts else 0,
+            "90th": int(np.percentile(response_counts, 90)) if response_counts else 0,
+            "95th": int(np.percentile(response_counts, 95)) if response_counts else 0,
+            "99th": int(np.percentile(response_counts, 99)) if response_counts else 0,
+            "max": int(np.max(response_counts)) if response_counts else 0,
+            "mean": float(np.mean(response_counts)) if response_counts else 0.0,
+            "n_over_200": int(np.sum(np.array(response_counts) > 200)),
+        }
+        
         # Aggregate statistics (convert numpy types to Python types for JSON serialization)
         results = {
             "total_pairs": int(total_pairs),
             "unique_prompts": int(len(prompt_groups)),
             "conflict_rate": float(total_conflicts / total_pairs if total_pairs > 0 else 0.0),
-            "triangle_cycles": int(total_cycles),
+            "triangle_cycles_majority": int(total_cycles),
+            "triangle_cycles_instance": int(total_instance_cycles),
             "mean_conflict_rate": float(np.mean(all_conflict_rates) if all_conflict_rates else 0.0),
-            "mean_cycles_per_prompt": float(np.mean(all_cycle_counts) if all_cycle_counts else 0.0),
-            "mean_loop_ratio_hodge": float(np.mean([x for x in all_loop_ratios if x > 0 and not np.isnan(x)]) if all_loop_ratios else 0.0),
-            "mean_spectral_gap": float(np.mean([x for x in all_spectral_gaps if x > 0 and not np.isnan(x)]) if all_spectral_gaps else 0.0),
-            "mean_mfas_score": float(np.mean([x for x in all_mfas_scores if x > 0 and not np.isnan(x)]) if all_mfas_scores else 0.0),
+            "mean_cycles_per_prompt_majority": float(np.mean(all_cycle_counts) if all_cycle_counts else 0.0),
+            "mean_cycles_per_prompt_instance": float(np.mean(all_instance_cycle_counts) if all_instance_cycle_counts else 0.0),
+            "mean_loop_ratio_hodge": float(np.nanmean(all_loop_ratios) if all_loop_ratios else 0.0),
+            "mean_baseline_loop_ratio": float(np.nanmean(all_baseline_loop_ratios) if all_baseline_loop_ratios else 0.0),
+            "mean_adjusted_loop_ratio": float(np.nanmean(all_adjusted_loop_ratios) if all_adjusted_loop_ratios else 0.0),
+            "mean_spectral_gap": float(np.nanmean(all_spectral_gaps) if all_spectral_gaps else 0.0),
+            "mean_mfas_score": float(np.nanmean(all_mfas_scores) if all_mfas_scores else 0.0),
+            "n_hodge_computed": n_hodge_computed,
+            "n_spectral_computed": n_spectral_computed,
+            "n_mfas_computed": n_mfas_computed,
             "per_prompt_stats_sample": dict(list(self.per_prompt_stats.items())[:10]),
             "prompts_with_multiple_responses": int(sum(1 for stats in self.per_prompt_stats.values() if stats["n_responses"] >= 3)),
             "prompts_with_conflicts": int(sum(1 for stats in self.per_prompt_stats.values() if stats["conflict_rate"] > 0)),
+            "response_count_distribution": response_count_dist,
         }
         
         # Add distributions
@@ -235,9 +297,9 @@ class TransitivityAnalyzer:
     
     def _count_triangles(self, pref_matrix: np.ndarray) -> int:
         """
-        Count 3-cycles (A>B, B>C, C>A).
+        Count 3-cycles (A>B, B>C, C>A) in the MAJORITY-VOTE aggregated graph.
         
-        Uses directed triangle counting algorithm.
+        Uses directed triangle counting algorithm on the aggregated preference matrix.
         """
         n = pref_matrix.shape[0]
         cycles = 0
@@ -254,6 +316,37 @@ class TransitivityAnalyzer:
                             cycles += 1
                             
         # Each cycle counted once (i->j->k->i)
+        return cycles
+    
+    def _count_instance_triangles(self, pairs: List[Tuple[str, str]], responses: List[str]) -> int:
+        """
+        Count 3-cycles at the INSTANCE level (raw preference pairs).
+        
+        For each triplet of responses (A, B, C), counts how many times we observe
+        the cycle A>B, B>C, C>A in the raw preference data.
+        
+        This counts MANY more cycles than majority-vote method since it looks at
+        individual preference instances rather than aggregated wins/losses.
+        """
+        n = len(responses)
+        resp_to_idx = {r: i for i, r in enumerate(responses)}
+        
+        # Build set of directed edges from raw pairs
+        edges = set()
+        for chosen, rejected in pairs:
+            i = resp_to_idx[chosen]
+            j = resp_to_idx[rejected]
+            edges.add((i, j))
+        
+        # Count cycles: for each ordered triplet, check if all three edges exist
+        cycles = 0
+        for i in range(n):
+            for j in range(n):
+                if i != j and (i, j) in edges:
+                    for k in range(n):
+                        if k != i and k != j and (j, k) in edges and (k, i) in edges:
+                            cycles += 1
+        
         return cycles
     
     def _compute_hodge_loop_ratio(self, pref_matrix: np.ndarray) -> float:
@@ -324,6 +417,68 @@ class TransitivityAnalyzer:
         loop_ratio = loop_energy / total_energy if total_energy > 0 else 0.0
         
         return float(np.clip(loop_ratio, 0, 1))
+    
+    def _compute_transitive_baseline(self, pref_matrix: np.ndarray) -> float:
+        """
+        Compute structural baseline loop ratio for a perfectly transitive graph.
+        
+        Takes the observed edge structure and enforces perfect transitivity based
+        on Bradley-Terry scores, then computes Hodge decomposition. This gives
+        the structural baseline loop ratio (floor due to observation topology).
+        
+        Returns:
+            Baseline loop ratio (0 = graph topology is perfectly transitive)
+        """
+        n = pref_matrix.shape[0]
+        
+        # Compute Bradley-Terry scores via Laplacian solver
+        total_comparisons = pref_matrix + pref_matrix.T
+        with np.errstate(divide='ignore', invalid='ignore'):
+            win_rates = np.where(total_comparisons > 0, pref_matrix / total_comparisons, 0.5)
+        
+        # Build Laplacian system to get BT scores
+        A = np.zeros((n, n))
+        b = np.zeros(n)
+        
+        for i in range(n):
+            for j in range(n):
+                if i != j and total_comparisons[i, j] > 0:
+                    A[i, i] += 1
+                    A[j, j] += 1
+                    A[i, j] -= 1
+                    A[j, i] -= 1
+                    b[i] += win_rates[i, j] - 0.5
+                    b[j] -= win_rates[i, j] - 0.5
+        
+        # Fix one node
+        A[0, :] = 0
+        A[0, 0] = 1
+        b[0] = 0
+        
+        try:
+            bt_scores = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            bt_scores = np.linalg.lstsq(A, b, rcond=None)[0]
+        
+        # Create synthetic transitive preference matrix using BT scores
+        # but with the same edge topology as the observed data
+        synthetic = np.zeros_like(pref_matrix)
+        for i in range(n):
+            for j in range(n):
+                if total_comparisons[i, j] > 0:
+                    # Enforce transitive ordering: higher BT score always wins
+                    if bt_scores[i] > bt_scores[j]:
+                        synthetic[i, j] = 1
+                    elif bt_scores[j] > bt_scores[i]:
+                        synthetic[j, i] = 1
+                    else:
+                        # Tie: assign randomly but consistently
+                        synthetic[i, j] = 0.5
+        
+        # Compute loop ratio on synthetic transitive graph
+        baseline_loop_ratio = self._compute_hodge_loop_ratio(synthetic)
+        
+        return baseline_loop_ratio
     
     def _compute_spectral_gap(self, pref_matrix: np.ndarray) -> float:
         """
@@ -546,7 +701,8 @@ if __name__ == "__main__":
     print(f"Total pairs: {results['total_pairs']:,}")
     print(f"Unique prompts: {results['unique_prompts']:,}")
     print(f"Overall conflict rate: {results['conflict_rate']:.4f}")
-    print(f"Total triangle cycles: {results['triangle_cycles']:,}")
+    print(f"Total triangle cycles (majority-vote): {results['triangle_cycles_majority']:,}")
+    print(f"Total triangle cycles (instance-level): {results['triangle_cycles_instance']:,}")
     print(f"Mean loop ratio (Hodge): {results['mean_loop_ratio_hodge']:.4f}")
     print(f"Mean spectral gap: {results['mean_spectral_gap']:.4f}")
     print(f"Mean MFAS score: {results['mean_mfas_score']:.4f}")
