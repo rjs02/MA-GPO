@@ -126,7 +126,7 @@ class PairWiseLoss(nn.Module):
         else:
             loss = -F.logsigmoid((chosen_reward - reject_reward) / self.tau)
             prob = F.sigmoid((chosen_reward - reject_reward) / self.tau)
-        return loss.mean(), prob.mean() 
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean() 
 class PairWiseRegressionLoss(nn.Module):
     """
     Pairwise Loss for Reward Model Regression Loss
@@ -148,7 +148,7 @@ class PairWiseRegressionLoss(nn.Module):
             result = chosen_reward - reject_reward
             loss = 0.5 * (result / self.tau - self.target_margin) ** 2
             prob = F.sigmoid(result / self.tau)
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
 class PairWiseLearnableTauLoss(nn.Module):
     """
     Pairwise Loss for Reward Model with Learnable Tau
@@ -169,7 +169,7 @@ class PairWiseLearnableTauLoss(nn.Module):
             loss = -F.logsigmoid(scaled_diff)
             prob = F.sigmoid(scaled_diff)
         
-        return loss.mean(), prob.mean()    
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()    
 class PairWiseLearnableTauRegressionLoss(nn.Module):
     """
     Pairwise Loss for Reward Model with Learnable Tau Regression Loss
@@ -191,7 +191,7 @@ class PairWiseLearnableTauRegressionLoss(nn.Module):
             loss = 0.5 * (scaled_diff - self.target_margin) ** 2
             prob = F.sigmoid(scaled_diff)
         
-        return loss.mean(), prob.mean() 
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean() 
 class GeneralPreferenceLoss(nn.Module):
     """
     Loss for General Preference Reward Model
@@ -211,7 +211,7 @@ class GeneralPreferenceLoss(nn.Module):
             result = chosen_reward[:, 0] * reject_reward[:, 1] - chosen_reward[:, 1] * reject_reward[:, 0]
             loss = -F.logsigmoid(result / self.tau)
             prob = F.sigmoid(result / self.tau)
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
 class GeneralPreferenceRegressionLoss(nn.Module):
     """
     Loss for General Preference Reward Model Regression Loss
@@ -233,7 +233,7 @@ class GeneralPreferenceRegressionLoss(nn.Module):
             result = chosen_reward[:, 0] * reject_reward[:, 1] - chosen_reward[:, 1] * reject_reward[:, 0]
             loss = 0.5 * (result / self.tau - self.target_margin) ** 2
             prob = F.sigmoid(result / self.tau)
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
 class GeneralPreferenceLearnableTauLoss(nn.Module):
     """
     Loss for General Preference Reward Model with Learnable Tau
@@ -254,7 +254,7 @@ class GeneralPreferenceLearnableTauLoss(nn.Module):
             loss = -F.logsigmoid(result / real_tau)
             prob = F.sigmoid(result / real_tau)
         
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
 class GeneralPreferenceLearnableTauRegressionLoss(nn.Module):
     """
     Loss for General Preference Reward Model with Learnable Tau Regression Loss
@@ -276,7 +276,7 @@ class GeneralPreferenceLearnableTauRegressionLoss(nn.Module):
             loss = 0.5 * (result / real_tau - self.target_margin) ** 2
             prob = F.sigmoid(result / real_tau)
         
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
 class HighDimGeneralPreferenceLoss(nn.Module):
     """
     Loss for General Preference Reward Model with high dimension value_head
@@ -312,7 +312,7 @@ class HighDimGeneralPreferenceLoss(nn.Module):
                 result = result.view(chosen_reward.shape[0])  
             loss = -F.logsigmoid(result / self.tau)
             prob = F.sigmoid(result / self.tau)
-        return loss.mean(), prob.mean()  
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()  
 class HighDimGeneralPreferenceRegressionLoss(nn.Module):
     """
     Loss for General Preference Reward Model with high dimension value_head
@@ -349,7 +349,7 @@ class HighDimGeneralPreferenceRegressionLoss(nn.Module):
                 result = result.view(chosen_reward.shape[0])  
             loss = 0.5 * (result / self.tau - self.target_margin) ** 2
             prob = F.sigmoid(result / self.tau)
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
 class HighDimGeneralPreferenceLearnableTauLoss(nn.Module):
     """
     Loss for General Preference Reward Model with high dimension value_head with Learnable Tau
@@ -393,7 +393,7 @@ class HighDimGeneralPreferenceLearnableTauLoss(nn.Module):
                 result = result.view(chosen_reward.shape[0])  
             loss = -F.logsigmoid(result / self.scale)
             prob = F.sigmoid(result / self.scale)
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
     
 class HighDimGeneralPreferenceMoELoss(nn.Module):
     """
@@ -424,7 +424,7 @@ class HighDimGeneralPreferenceMoELoss(nn.Module):
                 result = result.view(chosen_reward.shape[0])  
             loss = -F.logsigmoid(result / self.softmax_tau)
             prob = F.sigmoid(result / self.softmax_tau)
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()
 class HighDimGeneralPreferenceRegressionMoELoss(nn.Module):
     """
     Loss for General Preference Reward Model with high dimension value_head and Data Dependent MoE
@@ -455,4 +455,4 @@ class HighDimGeneralPreferenceRegressionMoELoss(nn.Module):
                 result = result.view(chosen_reward.shape[0])  
             loss = 0.5 * (result / self.softmax_tau - self.target_margin) ** 2
             prob = F.sigmoid(result / self.softmax_tau)
-        return loss.mean(), prob.mean()
+        return loss.mean(), prob.mean(), (prob > 0.5).float().mean()

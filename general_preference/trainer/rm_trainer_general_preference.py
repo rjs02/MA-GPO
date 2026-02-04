@@ -175,9 +175,9 @@ class GeneralPreferenceRewardTrainer(ABC):
                     prompt_end_index = chosen_last_hidden_states.size(1) - chosen_response_len_tensor - 1
                     prompt_end_index_expanded = prompt_end_index.unsqueeze(-1).expand(-1, -1, chosen_last_hidden_states.size(-1))
                     prompt_hidden_state = torch.gather(chosen_last_hidden_states, dim=1, index=prompt_end_index_expanded).squeeze(1)
-                    preference_loss, prob = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state.to(torch.cuda.current_device()), margin)
+                    preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state.to(torch.cuda.current_device()), margin)
                 else:
-                    preference_loss, prob = self.loss_fn(chosen_reward, reject_reward, margin)
+                    preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, margin)
                 
                 if args.add_pretrain_loss:
                     if isinstance(self.ptx_loss_fn, DPORefFreeLoss):
@@ -227,6 +227,7 @@ class GeneralPreferenceRewardTrainer(ABC):
                 logs_dict = {
                     "preference_loss": preference_loss.item(),
                     "prob": prob.item(),
+                    "accuracy": accuracy.item(),
                     "loss_mean": loss_mean,
                     "lr": current_lr,
                     "chosen_response_len_avg": chosen_len_batch.mean().item(),
@@ -343,6 +344,7 @@ class GeneralPreferenceRewardTrainer(ABC):
         with torch.no_grad():
             loss_sum = 0
             prob_sum = 0
+            accuracy_sum = 0
             for chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len, rejected_response_len in eval_dataloader:
                 chosen_ids = chosen_ids.squeeze(1).to(torch.cuda.current_device())
                 c_mask = c_mask.squeeze(1).to(torch.cuda.current_device())
@@ -365,23 +367,26 @@ class GeneralPreferenceRewardTrainer(ABC):
                     prompt_len = chosen_last_hidden_states.size(1) - chosen_response_len_tensor
                     prompt_len_expanded = prompt_len.unsqueeze(-1).expand(-1, -1, chosen_last_hidden_states.size(-1))
                     prompt_hidden_state = torch.gather(chosen_last_hidden_states, dim=1, index=prompt_len_expanded).squeeze(1)
-                    preference_loss, prob = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state, margin)
+                    preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state, margin)
                 else:
-                    preference_loss, prob = self.loss_fn(chosen_reward, reject_reward, margin)
+                    preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, margin)
                     
                 loss = preference_loss
 
-                loss_sum += loss.item() 
-                prob_sum += prob.item() 
+                loss_sum += loss.item()
+                prob_sum += prob.item()
+                accuracy_sum += accuracy.item()
                   
                 step_bar.update()
 
             loss_mean = loss_sum / self.eval_dataloader.__len__()
             prob_mean = prob_sum / self.eval_dataloader.__len__()
+            accuracy_mean = accuracy_sum / self.eval_dataloader.__len__()
 
             bar_dict = {
                 "eval_loss_mean": loss_mean,
                 "prob_mean": prob_mean,
+                "accuracy_mean": accuracy_mean,
             }
             logs = self.strategy.all_reduce(bar_dict)
             step_bar.set_postfix(logs)
