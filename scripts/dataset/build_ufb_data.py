@@ -126,12 +126,21 @@ def build_averaged_pairs(row, debug=False):
     return pairs
 
 
-def build_multidimensional_pairs(row, debug=False):
+def build_multidimensional_pairs(row, min_margin=1, remove_conflicts=True, debug=False):
     """
     Extract all preference pairs from a single UltraFeedback row.
 
     For each dimension and each pair of completions (i, j), create a preference
-    pair if completion i has a higher score than completion j.
+    pair if completion i has a higher score than completion j by at least min_margin.
+
+    Args:
+        row: A row from the UltraFeedback dataset
+        min_margin: Minimum score difference required (score_i - score_j >= min_margin)
+        remove_conflicts: If True, remove directly conflicting pairs where both
+            (A > B) and (B > A) exist across different dimensions. This removes
+            length-2 cycles while preserving longer cycles (A > B > C > A) that
+            represent genuine intransitive preferences.
+        debug: Print debug information
 
     Returns a list of preference pair dicts.
     """
@@ -163,7 +172,9 @@ def build_multidimensional_pairs(row, debug=False):
         print(f"[DEBUG] Scores by dimension: {scores_by_dimension}")
     
     # Build preference pairs for each dimension
+    # Track which (i, j) index pairs we've added to detect conflicts
     pairs = []
+    pair_indices = set()  # Set of (i, j) tuples that have been added
     n_completions = len(completions)
     
     for dim in DIMENSIONS:
@@ -177,9 +188,11 @@ def build_multidimensional_pairs(row, debug=False):
                 score_i = dim_scores[i]
                 score_j = dim_scores[j]
                 
-                # Skip invalid scores or ties
-                if score_i == -1 or score_j == -1 or score_i <= score_j:
+                # Skip invalid scores or insufficient margin
+                if score_i == -1 or score_j == -1 or score_i - score_j < min_margin:
                     continue
+                
+                pair_indices.add((i, j))
                 
                 # Build preference pair
                 pairs.append({
@@ -191,10 +204,44 @@ def build_multidimensional_pairs(row, debug=False):
                     "score_rejected": score_j,
                     "margin": score_i - score_j,
                     "source_dataset": "openbmb/UltraFeedback",
+                    "_idx_chosen": i,  # Temporary field for conflict detection
+                    "_idx_rejected": j,
                 })
     
     if debug:
-        print(f"[DEBUG] Generated {len(pairs)} pairs from this row")
+        print(f"[DEBUG] Generated {len(pairs)} pairs before conflict removal")
+    
+    # Remove directly conflicting pairs (length-2 cycles)
+    # A conflict occurs when both (i, j) and (j, i) exist in pair_indices
+    if remove_conflicts:
+        # Find all conflicting index pairs
+        conflicting_pairs = set()
+        for (i, j) in pair_indices:
+            if (j, i) in pair_indices:
+                conflicting_pairs.add((i, j))
+                conflicting_pairs.add((j, i))
+        
+        if debug and conflicting_pairs:
+            print(f"[DEBUG] Found {len(conflicting_pairs)} conflicting index pairs")
+        
+        # Filter out conflicting pairs
+        original_count = len(pairs)
+        pairs = [
+            p for p in pairs 
+            if (p["_idx_chosen"], p["_idx_rejected"]) not in conflicting_pairs
+        ]
+        
+        if debug:
+            removed = original_count - len(pairs)
+            print(f"[DEBUG] Removed {removed} pairs due to conflicts, {len(pairs)} remaining")
+    
+    # Remove temporary index fields
+    for p in pairs:
+        del p["_idx_chosen"]
+        del p["_idx_rejected"]
+    
+    if debug:
+        print(f"[DEBUG] Final: {len(pairs)} pairs from this row")
     
     return pairs
 
@@ -247,13 +294,20 @@ def main(args):
     
     # Select pair-building function based on mode
     if args.averaged:
-        build_pairs_fn = build_averaged_pairs
+        build_pairs_fn = lambda row, debug=False: build_averaged_pairs(row, debug=debug)
         mode_name = "averaged"
         print("Mode: AVERAGED scores (purely transitive preferences)")
     else:
-        build_pairs_fn = build_multidimensional_pairs
+        build_pairs_fn = lambda row, debug=False: build_multidimensional_pairs(
+            row, 
+            min_margin=args.min_margin,
+            remove_conflicts=args.remove_conflicts,
+            debug=debug
+        )
         mode_name = "multidimensional"
         print("Mode: MULTIDIMENSIONAL (separate pairs per dimension)")
+        print(f"  Min margin: {args.min_margin}")
+        print(f"  Remove conflicts (length-2 cycles): {args.remove_conflicts}")
 
     first_match_debugged = False
     for row in tqdm(full_dataset, desc="Processing rows"):
@@ -275,10 +329,72 @@ def main(args):
     
     print(f"  Matched:   {matched_count:,} rows")
     print(f"  Unmatched: {unmatched_count:,} rows")
-    print(f"\n[DEBUG] Pairs collected per split:")
+    print(f"\n[DEBUG] Pairs collected per split (before split-level conflict removal):")
     print(f"  Train: {len(split_pairs['train']):,} pairs")
     print(f"  Val:   {len(split_pairs['val']):,} pairs")
     print(f"  Test:  {len(split_pairs['test']):,} pairs")
+    
+    # Remove conflicts at split level (handles cross-row conflicts from same prompt)
+    if not args.averaged and args.remove_conflicts:
+        print("\nRemoving conflicts at split level (cross-row conflicts)...")
+        for split_name in ["train", "val", "test"]:
+            pairs = split_pairs[split_name]
+            
+            # Group pairs by prompt and identify conflicting (chosen, rejected) content pairs
+            prompt_pairs_map = defaultdict(list)  # prompt -> list of (pair_dict, chosen_content, rejected_content)
+            for p in pairs:
+                prompt_key = p["prompt"][0]["content"]
+                chosen = p["chosen"][0]["content"]
+                rejected = p["rejected"][0]["content"]
+                prompt_pairs_map[prompt_key].append((p, chosen, rejected))
+            
+            # Find and remove conflicts
+            clean_pairs = []
+            removed_count = 0
+            
+            for prompt_key, prompt_data in prompt_pairs_map.items():
+                # Build set of (chosen, rejected) tuples for this prompt
+                pair_directions = set((c, r) for (_, c, r) in prompt_data)
+                
+                # Find conflicting pairs
+                conflicts = set()
+                for (c, r) in pair_directions:
+                    if (r, c) in pair_directions:
+                        conflicts.add((c, r))
+                        conflicts.add((r, c))
+                
+                # Keep non-conflicting pairs
+                for (p, c, r) in prompt_data:
+                    if (c, r) not in conflicts:
+                        clean_pairs.append(p)
+                    else:
+                        removed_count += 1
+            
+            split_pairs[split_name] = clean_pairs
+            print(f"  {split_name}: Removed {removed_count} conflicting pairs, {len(clean_pairs):,} remaining")
+    
+    # Verify no direct conflicts remain (sanity check)
+    if not args.averaged:
+        print("\nVerifying no direct conflicts (length-2 cycles) remain...")
+        for split_name, pairs in split_pairs.items():
+            # Group by prompt and check for conflicts
+            prompt_pairs_map = defaultdict(set)
+            for p in pairs:
+                prompt_key = p["prompt"][0]["content"]
+                chosen = p["chosen"][0]["content"]
+                rejected = p["rejected"][0]["content"]
+                prompt_pairs_map[prompt_key].add((chosen, rejected))
+            
+            conflict_count = 0
+            for prompt_key, pair_set in prompt_pairs_map.items():
+                for (c, r) in pair_set:
+                    if (r, c) in pair_set:
+                        conflict_count += 1
+            
+            if conflict_count > 0:
+                print(f"  WARNING: {split_name} has {conflict_count // 2} conflicting pairs!")
+            else:
+                print(f"  {split_name}: ✓ No conflicts")
     
     # Save preference splits
     prefix = "pref_averaged" if args.averaged else "pref"
@@ -338,6 +454,26 @@ if __name__ == "__main__":
         default=False,
         help="Average scores across all 4 dimensions to create purely transitive preferences",
     )
+    parser.add_argument(
+        "--min_margin",
+        type=int,
+        default=2,
+        help="Minimum score difference required for a preference pair (default: 2). "
+             "E.g., with min_margin=2, only pairs where score_chosen - score_rejected >= 2 are included.",
+    )
+    parser.add_argument(
+        "--remove_conflicts",
+        action="store_true",
+        default=True,
+        help="Remove directly conflicting pairs (length-2 cycles) where both A>B and B>A exist "
+             "across different dimensions. Longer cycles (A>B>C>A) are preserved. (default: True)",
+    )
+    parser.add_argument(
+        "--no_remove_conflicts",
+        action="store_false",
+        dest="remove_conflicts",
+        help="Keep all pairs including directly conflicting ones",
+    )
 
     args = parser.parse_args()
     main(args)
@@ -348,7 +484,15 @@ srun --ntasks=1 --cpus-per-task=16 --time=1:00:00 --mem-per-cpu=8192 --pty bash
 module load stack/2024-06 python_cuda/3.11.6 eth_proxy
 source ../OpenNLHF/.venv/bin/activate
 
+# Averaged mode (purely transitive):
 python scripts/dataset/build_ufb_data.py --output_dir ${LASDIR}/data/ufb --averaged
 
+# Multidimensional mode (intransitive, with conflict removal and min margin):
+python scripts/dataset/build_ufb_data.py --output_dir ${LASDIR}/data/ufb --min_margin 2 --remove_conflicts
 
+# Multidimensional with no conflict removal (NOT recommended - ambiguous labels):
+python scripts/dataset/build_ufb_data.py --output_dir ${LASDIR}/data/ufb --min_margin 2 --no_remove_conflicts
+
+python scripts/dataset/build_ufb_data.py --output_dir /iopsstor/scratch/cscs/rosieber/MA/data/ufb-multidim-nc --min_margin 2 --remove_conflicts
 """
+

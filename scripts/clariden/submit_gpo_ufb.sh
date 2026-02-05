@@ -29,6 +29,6 @@ mkdir -p "${MA_SCRATCH_CAP:-/capstor/scratch/cscs/rosieber/MA}/runs/gpo"
 
 # Run training
 srun -ul --environment=openrlhf \
-    bash "${MA_HOME:-/users/rosieber/MA}/MA-GPO/scripts/clariden/train_gpo_ufb.sh"
+    bash "${MA_HOME:-/users/rosieber/MA}/MA-GPO/scripts/clariden/train_gpo_ufb-multidim.sh"
 
 echo "End time: $(date)"

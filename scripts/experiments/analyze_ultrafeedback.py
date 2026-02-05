@@ -384,4 +384,10 @@ python scripts/experiments/analyze_ultrafeedback.py \
     --output_dir results/ufb_analysis_sample \
     --max_samples 10000 \
     --generate_plots
+
+python scripts/experiments/analyze_ultrafeedback.py \
+    --dataset $MA_SCRATCH_IOPS/data/ufb-multidim-nc/pref_train \
+    --output_dir results/ufb_analysis_multidim_nc \
+    --generate_plots
 """
+

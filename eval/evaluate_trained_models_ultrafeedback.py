@@ -27,11 +27,12 @@ from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
 from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer, AutoModel
+import safetensors.torch
 
 # Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from scripts.metrics.transitivity_metrics import TransitivityAnalyzer
-from general_preference.scripts.RMs.reward_model import get_reward_model, get_tokenizer
+from general_preference.models import get_reward_model
+from general_preference.utils import get_tokenizer
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -84,7 +85,8 @@ def compute_all_probabilistic_metrics(empirical_probs, predicted_probs):
     brier = float(np.mean((p_pred - p_true) ** 2))
     
     # 2. Negative log-likelihood
-    nll = float(-np.mean(np.log(np.clip(p_pred, 1e-9, 1.0))))
+    eps = 1e-7  # Conservative clipping
+    nll = float(-np.mean(np.log(np.clip(p_pred, eps, 1.0))))
     
     # 3. Expected Calibration Error (10 bins)
     n_bins = 10
@@ -108,18 +110,30 @@ def compute_all_probabilistic_metrics(empirical_probs, predicted_probs):
     acc_weak = float((p_pred[weak_mask] > 0.5).mean()) if weak_mask.any() else float('nan')
     
     # 6. Prediction entropy (higher = less collapsed)
+    eps = 1e-7  # Conservative clipping
     entropy = float(-np.mean(
-        p_pred * np.log(np.clip(p_pred, 1e-9, 1.0)) +
-        (1 - p_pred) * np.log(np.clip(1 - p_pred, 1e-9, 1.0))
+        p_pred * np.log(np.clip(p_pred, eps, 1.0)) +
+        (1 - p_pred) * np.log(np.clip(1 - p_pred, eps, 1.0))
     ))
     
     # 7. KL divergence from empirical
-    p_true_clipped = np.clip(p_true, 1e-9, 1 - 1e-9)
-    p_pred_clipped = np.clip(p_pred, 1e-9, 1 - 1e-9)
-    kl_div = float(np.mean(
-        p_true_clipped * np.log(p_true_clipped / p_pred_clipped) +
-        (1 - p_true_clipped) * np.log((1 - p_true_clipped) / (1 - p_pred_clipped))
-    ))
+    # Use more conservative clipping to avoid numerical overflow with very confident predictions
+    eps = 1e-7  # Increased from 1e-9 to handle bfloat16/float32 precision
+    p_true_clipped = np.clip(p_true, eps, 1 - eps)
+    p_pred_clipped = np.clip(p_pred, eps, 1 - eps)
+    
+    # Compute KL divergence with additional safeguards
+    kl_term1 = p_true_clipped * np.log(p_true_clipped / p_pred_clipped)
+    kl_term2 = (1 - p_true_clipped) * np.log((1 - p_true_clipped) / (1 - p_pred_clipped))
+    
+    # Filter out any inf/nan values that might still occur
+    kl_terms = kl_term1 + kl_term2
+    kl_terms = kl_terms[np.isfinite(kl_terms)]  # Remove inf/nan
+    
+    if len(kl_terms) > 0:
+        kl_div = float(np.mean(kl_terms))
+    else:
+        kl_div = float('nan')  # If all values were inf/nan
     
     return {
         'brier': brier,
@@ -159,8 +173,10 @@ def hodge_decompose_from_probs(pref_matrix, observed_mask):
 
     if total_energy < 1e-12:
         return dict(
-            gradient_energy=0.0, total_energy=0.0,
-            curl_energy=0.0, loop_ratio=0.0
+            gradient_energy=0.0, residual_energy=0.0,
+            curl_energy=0.0, harmonic_energy=0.0,
+            total_energy=0.0, loop_ratio=0.0,
+            curl_ratio=0.0, harmonic_ratio=0.0,
         )
 
     # Graph Laplacian on observed edges
@@ -181,15 +197,27 @@ def hodge_decompose_from_probs(pref_matrix, observed_mask):
     gradient_flow_full = r[:, np.newaxis] - r[np.newaxis, :]
     gradient_energy = float(np.sum(gradient_flow_full ** 2 * obs))
 
-    # Curl energy
-    curl_energy = float(max(0.0, total_energy - gradient_energy))
-    loop_ratio = float(np.clip(curl_energy / total_energy, 0.0, 1.0))
+    # Residual (divergence-free)
+    residual_flow   = flow - gradient_flow_full * obs
+    residual_energy = float(max(0.0, total_energy - gradient_energy))
+    loop_ratio      = float(np.clip(residual_energy / total_energy, 0.0, 1.0))
+
+    # Three-way split: residual → curl (local 3-cycles) + harmonic (global)
+    curl_flow, harmonic_flow = _curl_harmonic_split(residual_flow, obs)
+    curl_energy     = float(np.sum(curl_flow ** 2))
+    harmonic_energy = float(np.sum(harmonic_flow ** 2))
+    curl_ratio      = float(curl_energy / total_energy) if total_energy > 0 else 0.0
+    harmonic_ratio  = float(harmonic_energy / total_energy) if total_energy > 0 else 0.0
 
     return dict(
-        gradient_energy=gradient_energy,
-        total_energy=total_energy,
-        curl_energy=curl_energy,
-        loop_ratio=loop_ratio,
+        gradient_energy  = gradient_energy,
+        residual_energy  = residual_energy,
+        curl_energy      = curl_energy,
+        harmonic_energy  = harmonic_energy,
+        total_energy     = total_energy,
+        loop_ratio       = loop_ratio,
+        curl_ratio       = curl_ratio,
+        harmonic_ratio   = harmonic_ratio,
     )
 
 
@@ -218,9 +246,13 @@ def hodge_decompose(counts):
     if total_energy < 1e-12:
         zeros = np.zeros((n, n))
         return dict(potential_r=np.zeros(n), flow=flow,
-                    gradient_flow=zeros, curl_flow=flow.copy(),
-                    gradient_energy=0.0, total_energy=0.0,
-                    curl_energy=0.0, loop_ratio=0.0, observed_mask=obs)
+                    gradient_flow=zeros, residual_flow=zeros,
+                    curl_flow=zeros, harmonic_flow=zeros,
+                    gradient_energy=0.0, residual_energy=0.0,
+                    curl_energy=0.0, harmonic_energy=0.0,
+                    total_energy=0.0, loop_ratio=0.0,
+                    curl_ratio=0.0, harmonic_ratio=0.0,
+                    observed_mask=obs)
 
     L = np.diag(obs.sum(axis=1).astype(float)) - obs.astype(float)
     b = flow.sum(axis=1)
@@ -238,43 +270,190 @@ def hodge_decompose(counts):
     gradient_energy = float(np.sum(gradient_flow_full ** 2 * obs))
     gradient_flow = gradient_flow_full * obs
 
-    curl_flow = flow - gradient_flow
-    curl_energy = float(max(0.0, total_energy - gradient_energy))
-    loop_ratio = float(np.clip(curl_energy / total_energy, 0.0, 1.0))
+    # residual = total − gradient  (divergence-free)
+    residual_flow    = flow - gradient_flow
+    residual_energy  = float(max(0.0, total_energy - gradient_energy))
+    loop_ratio       = float(np.clip(residual_energy / total_energy, 0.0, 1.0))
+
+    # three-way split: residual → curl (local 3-cycles) + harmonic (global)
+    curl_flow, harmonic_flow = _curl_harmonic_split(residual_flow, obs)
+    curl_energy     = float(np.sum(curl_flow ** 2))
+    harmonic_energy = float(np.sum(harmonic_flow ** 2))
+    curl_ratio      = float(curl_energy / total_energy) if total_energy > 0 else 0.0
+    harmonic_ratio  = float(harmonic_energy / total_energy) if total_energy > 0 else 0.0
 
     return dict(
-        potential_r=r,
-        flow=flow,
-        gradient_flow=gradient_flow,
-        curl_flow=curl_flow,
-        gradient_energy=gradient_energy,
-        total_energy=total_energy,
-        curl_energy=curl_energy,
-        loop_ratio=loop_ratio,
-        observed_mask=obs,
+        potential_r      = r,
+        flow             = flow,
+        gradient_flow    = gradient_flow,
+        residual_flow    = residual_flow,
+        curl_flow        = curl_flow,
+        harmonic_flow    = harmonic_flow,
+        gradient_energy  = gradient_energy,
+        residual_energy  = residual_energy,
+        curl_energy      = curl_energy,
+        harmonic_energy  = harmonic_energy,
+        total_energy     = total_energy,
+        loop_ratio       = loop_ratio,
+        curl_ratio       = curl_ratio,
+        harmonic_ratio   = harmonic_ratio,
+        observed_mask    = obs,
     )
+
+
+def _curl_harmonic_split(residual_flow, observed_mask):
+    """Separate divergence-free residual R* into curl and harmonic.
+
+    curl*(Φ) = B₂ Φ  — projection onto Im(boundary₂), i.e. local 3-cycles.
+    H = R* − curl*(Φ) — orthogonal complement (global cycles).
+
+    On complete subgraphs (K₃, K₄) H = 0.  On sparse graphs with missing
+    triangles the harmonic part captures cycles not decomposable into 3-cycles.
+    """
+    n = residual_flow.shape[0]
+    obs = observed_mask & ~np.eye(n, dtype=bool)
+
+    # ── upper-triangle edges ──
+    edges = []
+    edge_to_idx = {}
+    for i in range(n):
+        for j in range(i + 1, n):
+            if obs[i, j]:
+                edge_to_idx[(i, j)] = len(edges)
+                edges.append((i, j))
+
+    # ── observed triangles ──
+    triangles = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            if not obs[i, j]:
+                continue
+            for k in range(j + 1, n):
+                if obs[i, k] and obs[j, k]:
+                    triangles.append((i, j, k))
+    n_tri = len(triangles)
+
+    if n_tri == 0:
+        return np.zeros_like(residual_flow), residual_flow.copy()
+
+    # ── boundary matrix B₂  (m edges × n_tri triangles) ──
+    # oriented triangle (i<j<k):  edge(i,j) +1, edge(i,k) -1, edge(j,k) +1
+    m = len(edges)
+    B2 = np.zeros((m, n_tri))
+    for t_idx, (i, j, k) in enumerate(triangles):
+        B2[edge_to_idx[(i, j)], t_idx] =  1.0
+        B2[edge_to_idx[(i, k)], t_idx] = -1.0
+        B2[edge_to_idx[(j, k)], t_idx] =  1.0
+
+    # residual on upper-triangle edges
+    r = np.array([residual_flow[i, j] for (i, j) in edges])
+
+    # ── project onto Im(B₂) ──
+    Phi, _, _, _ = np.linalg.lstsq(B2, r, rcond=None)
+    curl_r = B2 @ Phi
+
+    # ── back to antisymmetric n×n ──
+    curl_flow = np.zeros((n, n))
+    for idx, (i, j) in enumerate(edges):
+        curl_flow[i, j] =  curl_r[idx]
+        curl_flow[j, i] = -curl_r[idx]
+
+    harmonic_flow = residual_flow - curl_flow
+    return curl_flow, harmonic_flow
 
 
 # ── MODEL LOADING ───────────────────────────────────────────────────────────
 
-def load_reward_model(checkpoint_path, device=DEVICE):
+def load_reward_model(checkpoint_path, tau, device=DEVICE):
     """Load trained reward model from checkpoint.
-    
+
+    Automatically detects the reward dimension from the checkpoint files.
+    tau must match the value used during training (e.g. 1.0 for BT, 0.1 for GPO).
+
     Returns:
         model: Reward model instance
         tokenizer: HuggingFace tokenizer
         reward_dim: int (1 for RM, >1 for GPO)
-        tau: float (temperature for GPO)
+        tau: float (temperature, passed through)
     """
     checkpoint_path = Path(checkpoint_path)
     
-    # Load model using get_reward_model (handles both RM and GPO)
+    print(f"Loading checkpoint from {checkpoint_path}")
+    
+    # First, detect the value_head dimension from the checkpoint
+    # Find safetensors files (model shards or single file)
+    safetensors_files = list(checkpoint_path.glob("model*.safetensors"))
+    if not safetensors_files:
+        # Try without model prefix
+        safetensors_files = list(checkpoint_path.glob("*.safetensors"))
+    
+    if not safetensors_files:
+        raise FileNotFoundError(f"No safetensors files found in {checkpoint_path}")
+    
+    print(f"Found {len(safetensors_files)} safetensors file(s)")
+    
+    # Load the index to find which file contains value_head
+    index_file = checkpoint_path / "model.safetensors.index.json"
+    value_head_file = None
+    
+    if index_file.exists():
+        print("Loading from sharded checkpoint (using index)")
+        with open(index_file) as f:
+            index = json.load(f)
+        
+        # Find which shard contains value_head.weight
+        for key, filename in index['weight_map'].items():
+            if 'value_head.weight' in key:
+                value_head_file = checkpoint_path / filename
+                print(f"Found value_head in shard: {filename}")
+                break
+    
+    if value_head_file is None:
+        # Try to find value_head in any file
+        print("Searching for value_head in checkpoint files...")
+        for sf_file in safetensors_files:
+            try:
+                with safetensors.torch.safe_open(str(sf_file), framework="pt") as f:
+                    keys = list(f.keys())
+                    if any('value_head.weight' in k for k in keys):
+                        value_head_file = sf_file
+                        print(f"Found value_head in: {sf_file.name}")
+                        break
+            except Exception as e:
+                print(f"Could not read {sf_file.name}: {e}")
+                continue
+    
+    if value_head_file is None:
+        raise ValueError(f"Could not find value_head.weight in any checkpoint file in {checkpoint_path}")
+    
+    # Load just the value_head to check its dimension
+    print(f"Reading value_head dimension from {value_head_file.name}...")
+    with safetensors.torch.safe_open(str(value_head_file), framework="pt") as f:
+        keys = list(f.keys())
+        value_head_key = None
+        for k in keys:
+            if 'value_head.weight' in k:
+                value_head_key = k
+                break
+        
+        if value_head_key is None:
+            raise ValueError(f"value_head.weight not found in {value_head_file.name}")
+        
+        value_head_weight = f.get_tensor(value_head_key)
+        reward_dim = value_head_weight.shape[0]
+    
+    print(f"✓ Detected reward dimension: {reward_dim}")
+    
+    # Now load model with correct dimension
+    is_gpo = reward_dim > 1
+    print(f"Loading {'GPO' if is_gpo else 'Bradley-Terry'} model...")
+    
     model = get_reward_model(
         str(checkpoint_path),
         bf16=True,
         use_flash_attention_2=False,
-        is_general_preference=True,  # Load with GPO support (value_head_dim will be read from config)
-        value_head_dim=8,  # Will be overridden by checkpoint
+        is_general_preference=is_gpo,
+        value_head_dim=reward_dim,
     )
     model = model.to(device)
     model.eval()
@@ -282,15 +461,11 @@ def load_reward_model(checkpoint_path, device=DEVICE):
     # Load tokenizer
     tokenizer = get_tokenizer(str(checkpoint_path), model, padding_side="left")
     
-    # Determine reward_dim from value_head
-    reward_dim = model.value_head.out_features
-    is_gpo = reward_dim > 1
-    tau = 0.1  # Default tau (should match training config)
-    
-    print(f"Loaded model from {checkpoint_path}")
+    print(f"✓ Successfully loaded model:")
+    print(f"  Type: {'GPO (General Preference)' if is_gpo else 'Bradley-Terry (scalar reward)'}")
     print(f"  Reward dimension: {reward_dim}")
-    print(f"  Model type: {'GPO' if is_gpo else 'Bradley-Terry'}")
-    print(f"  Tau: {tau}")
+    print(f"  Temperature (tau): {tau}")
+    print()
     
     return model, tokenizer, reward_dim, tau
 
@@ -308,7 +483,10 @@ def get_response_reward(model, tokenizer, prompt, response, device=DEVICE, max_l
     ]
     
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    text = text.replace(tokenizer.bos_token, "")  # Remove BOS for consistency with training
+    
+    # Remove BOS token if present (for consistency with training)
+    if tokenizer.bos_token is not None:
+        text = text.replace(tokenizer.bos_token, "")
     
     # Tokenize (left padding as in training)
     inputs = tokenizer(
@@ -355,19 +533,21 @@ def compute_preference_matrix_batched(model, tokenizer, responses, prompt, rewar
     with torch.no_grad():
         if reward_dim == 1:
             # Bradley-Terry: scalar rewards
-            reward_diff = rewards.unsqueeze(1) - rewards.unsqueeze(0)  # [N, N]
-            pref_matrix = torch.sigmoid(reward_diff).squeeze(-1).cpu().numpy()
+            # P(i > j) = sigmoid((r_i - r_j) / tau)
+            # NOTE: tau is crucial! Training uses sigmoid((r_chosen - r_rejected) / tau)
+            reward_diff = rewards.unsqueeze(1) - rewards.unsqueeze(0)  # [N, 1] - [1, N] = [N, N]
+            pref_matrix = torch.sigmoid(reward_diff / tau).float().cpu().numpy()
         else:
             # GPO: antisymmetric bilinear form v_i @ R^T @ v_j
             # Create R matrix (block-diagonal skew-symmetric)
-            R = torch.zeros(reward_dim, reward_dim, device=device)
+            R = torch.zeros(reward_dim, reward_dim, device=device, dtype=rewards.dtype)
             for i in range(0, reward_dim, 2):
                 R[i, i + 1] = -1
                 R[i + 1, i] = 1
             
             # Compute scores: S[i,j] = v_i @ R^T @ v_j
             S = rewards @ R.T @ rewards.T  # [N, N]
-            pref_matrix = torch.sigmoid(S / tau).cpu().numpy()
+            pref_matrix = torch.sigmoid(S / tau).float().cpu().numpy()
     
     return pref_matrix
 
@@ -509,6 +689,8 @@ def evaluate_dataset(model, tokenizer, prompt_groups, reward_dim, tau, device=DE
         'acc_weak_conf': [],
         'entropy': [],
         'pred_loop_ratio': [],
+        'pred_curl_ratio': [],
+        'pred_harmonic_ratio': [],
     }
     
     prompt_results = {}
@@ -529,8 +711,8 @@ def evaluate_dataset(model, tokenizer, prompt_groups, reward_dim, tau, device=DE
         
         # Collect all metrics
         for key in metrics_lists.keys():
-            if key == 'pred_loop_ratio':
-                continue  # Handle separately
+            if key in ('pred_loop_ratio', 'pred_curl_ratio', 'pred_harmonic_ratio'):
+                continue  # Handle separately after Hodge decomposition
             metrics_lists[key].append(result[key])
         
         # Hodge decomposition on predicted preferences
@@ -540,6 +722,8 @@ def evaluate_dataset(model, tokenizer, prompt_groups, reward_dim, tau, device=DE
         
         pred_hodge = hodge_decompose_from_probs(result['pref_matrix'], observed_mask)
         metrics_lists['pred_loop_ratio'].append(pred_hodge['loop_ratio'])
+        metrics_lists['pred_curl_ratio'].append(pred_hodge['curl_ratio'])
+        metrics_lists['pred_harmonic_ratio'].append(pred_hodge['harmonic_ratio'])
         
         # Store per-prompt results
         prompt_results[prompt[:100]] = {
@@ -554,11 +738,17 @@ def evaluate_dataset(model, tokenizer, prompt_groups, reward_dim, tau, device=DE
             'entropy': result['entropy'],
             'n_responses': result['n_responses'],
             'n_pairs': result['n_pairs'],
-            'data_loop_ratio': data_hodge['loop_ratio'],
-            'pred_loop_ratio': pred_hodge['loop_ratio'],
+            'data_loop_ratio':      data_hodge['loop_ratio'],
+            'data_curl_ratio':      data_hodge['curl_ratio'],
+            'data_harmonic_ratio':  data_hodge['harmonic_ratio'],
+            'pred_loop_ratio':      pred_hodge['loop_ratio'],
+            'pred_curl_ratio':      pred_hodge['curl_ratio'],
+            'pred_harmonic_ratio':  pred_hodge['harmonic_ratio'],
             'pred_gradient_energy': pred_hodge['gradient_energy'],
-            'pred_curl_energy': pred_hodge['curl_energy'],
-            'pred_total_energy': pred_hodge['total_energy'],
+            'pred_residual_energy': pred_hodge['residual_energy'],
+            'pred_curl_energy':     pred_hodge['curl_energy'],
+            'pred_harmonic_energy': pred_hodge['harmonic_energy'],
+            'pred_total_energy':    pred_hodge['total_energy'],
         }
     
     # Compute aggregate statistics
@@ -733,6 +923,18 @@ def main():
         default=100,
         help="Skip prompts with >N responses (memory limit)"
     )
+    parser.add_argument(
+        "--rm_tau",
+        type=float,
+        default=1.0,
+        help="Temperature for BT/RM model (must match training). Default 1.0."
+    )
+    parser.add_argument(
+        "--gpo_tau",
+        type=float,
+        default=0.1,
+        help="Temperature for GPO model (must match training). Default 0.1."
+    )
     
     args = parser.parse_args()
     
@@ -751,8 +953,8 @@ def main():
     print("\n" + "="*70)
     print("LOADING MODELS")
     print("="*70)
-    rm_model, rm_tokenizer, rm_dim, rm_tau = load_reward_model(args.rm_checkpoint, DEVICE)
-    gpo_model, gpo_tokenizer, gpo_dim, gpo_tau = load_reward_model(args.gpo_checkpoint, DEVICE)
+    rm_model, rm_tokenizer, rm_dim, rm_tau = load_reward_model(args.rm_checkpoint, args.rm_tau, DEVICE)
+    gpo_model, gpo_tokenizer, gpo_dim, gpo_tau = load_reward_model(args.gpo_checkpoint, args.gpo_tau, DEVICE)
     
     # Load dataset
     print("\n" + "="*70)
@@ -813,6 +1015,8 @@ def main():
     print(f"  Entropy:              {rm_results['mean_entropy']:.4f}")
     print(f"\nIntransitivity Capture:")
     print(f"  Pred Loop Ratio:      {rm_results['mean_pred_loop_ratio']:.4f}")
+    print(f"  Pred Curl Ratio:      {rm_results['mean_pred_curl_ratio']:.4f}")
+    print(f"  Pred Harmonic Ratio:  {rm_results['mean_pred_harmonic_ratio']:.4f}")
     
     # Evaluate GPO
     print("\n" + "="*70)
@@ -835,6 +1039,8 @@ def main():
     print(f"  Entropy:              {gpo_results['mean_entropy']:.4f}")
     print(f"\nIntransitivity Capture:")
     print(f"  Pred Loop Ratio:      {gpo_results['mean_pred_loop_ratio']:.4f}")
+    print(f"  Pred Curl Ratio:      {gpo_results['mean_pred_curl_ratio']:.4f}")
+    print(f"  Pred Harmonic Ratio:  {gpo_results['mean_pred_harmonic_ratio']:.4f}")
     
     # Compute gaps (positive means GPO is better)
     acc_gap = gpo_results['mean_accuracy'] - rm_results['mean_accuracy']
@@ -929,8 +1135,12 @@ def main():
             'entropy_gap': entropy_gap,
             
             # Intransitivity capture
-            'rm_mean_pred_loop_ratio': rm_results['mean_pred_loop_ratio'],
-            'gpo_mean_pred_loop_ratio': gpo_results['mean_pred_loop_ratio'],
+            'rm_mean_pred_loop_ratio':     rm_results['mean_pred_loop_ratio'],
+            'rm_mean_pred_curl_ratio':     rm_results['mean_pred_curl_ratio'],
+            'rm_mean_pred_harmonic_ratio': rm_results['mean_pred_harmonic_ratio'],
+            'gpo_mean_pred_loop_ratio':     gpo_results['mean_pred_loop_ratio'],
+            'gpo_mean_pred_curl_ratio':     gpo_results['mean_pred_curl_ratio'],
+            'gpo_mean_pred_harmonic_ratio': gpo_results['mean_pred_harmonic_ratio'],
             'pred_loop_ratio_gap': loop_gap,
             
             # Data statistics
@@ -973,3 +1183,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
