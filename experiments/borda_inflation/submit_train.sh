@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=borda-train
+#SBATCH --account=a166
+#SBATCH --time=12:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=72
+#SBATCH --partition=normal
+#SBATCH --output=/users/rosieber/MA/logs/borda-train-%j.out
+#SBATCH --error=/users/rosieber/MA/logs/borda-train-%j.err
+
+# Borda Inflation Experiment: Train RM + PM on Llama-3-8B
+# Submit with: sbatch experiments/borda_inflation/submit_train.sh
+#
+# Override defaults:
+#   TRAIN_MODE=rm sbatch experiments/borda_inflation/submit_train.sh   # RM only
+#   TRAIN_MODE=pm sbatch experiments/borda_inflation/submit_train.sh   # PM only
+#   TRAIN_MODE=both sbatch experiments/borda_inflation/submit_train.sh # Both (default)
+
+ulimit -c 0
+
+echo "=== Borda Inflation Training Submission ==="
+echo "Job ID: ${SLURM_JOB_ID}"
+echo "Node: $(hostname)"
+echo "Start time: $(date)"
+
+mkdir -p "${MA_LOGS:-/users/rosieber/MA/logs}"
+mkdir -p "${MA_SCRATCH_CAP:-/capstor/scratch/cscs/rosieber/MA}/runs/borda_inflation"
+
+srun -ul --environment=openrlhf \
+    bash "${MA_HOME:-/users/rosieber/MA}/MA-GPO/experiments/borda_inflation/train_llama_ufb.sh"
+
+echo "End time: $(date)"
