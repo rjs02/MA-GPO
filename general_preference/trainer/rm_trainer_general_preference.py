@@ -178,6 +178,8 @@ class GeneralPreferenceRewardTrainer(ABC):
                     preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state.to(torch.cuda.current_device()), margin)
                 else:
                     preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, margin)
+                # Binary NLL for positive pair labels (chosen should beat rejected).
+                nll = -torch.log(prob.clamp(min=1e-8, max=1 - 1e-8))
                 
                 if args.add_pretrain_loss:
                     if isinstance(self.ptx_loss_fn, DPORefFreeLoss):
@@ -226,6 +228,7 @@ class GeneralPreferenceRewardTrainer(ABC):
 
                 logs_dict = {
                     "preference_loss": preference_loss.item(),
+                    "nll": nll.item(),
                     "prob": prob.item(),
                     "accuracy": accuracy.item(),
                     "loss_mean": loss_mean,
@@ -343,6 +346,7 @@ class GeneralPreferenceRewardTrainer(ABC):
         self.model.eval()
         with torch.no_grad():
             loss_sum = 0
+            nll_sum = 0
             prob_sum = 0
             accuracy_sum = 0
             for chosen_ids, c_mask, reject_ids, r_mask, margin, chosen_response_len, rejected_response_len in eval_dataloader:
@@ -370,21 +374,25 @@ class GeneralPreferenceRewardTrainer(ABC):
                     preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, prompt_hidden_state, margin)
                 else:
                     preference_loss, prob, accuracy = self.loss_fn(chosen_reward, reject_reward, margin)
+                nll = -torch.log(prob.clamp(min=1e-8, max=1 - 1e-8))
                     
                 loss = preference_loss
 
                 loss_sum += loss.item()
+                nll_sum += nll.item()
                 prob_sum += prob.item()
                 accuracy_sum += accuracy.item()
                   
                 step_bar.update()
 
             loss_mean = loss_sum / self.eval_dataloader.__len__()
+            nll_mean = nll_sum / self.eval_dataloader.__len__()
             prob_mean = prob_sum / self.eval_dataloader.__len__()
             accuracy_mean = accuracy_sum / self.eval_dataloader.__len__()
 
             bar_dict = {
                 "eval_loss_mean": loss_mean,
+                "nll_mean": nll_mean,
                 "prob_mean": prob_mean,
                 "accuracy_mean": accuracy_mean,
             }

@@ -16,6 +16,9 @@
 #   TRAIN_MODE=rm sbatch experiments/borda_inflation/submit_train.sh   # RM only
 #   TRAIN_MODE=pm sbatch experiments/borda_inflation/submit_train.sh   # PM only
 #   TRAIN_MODE=both sbatch experiments/borda_inflation/submit_train.sh # Both (default)
+#
+# Resume from checkpoint:
+#   TRAIN_MODE=pm RESUME_FROM=/path/to/run/dir sbatch experiments/borda_inflation/submit_train.sh
 
 ulimit -c 0
 

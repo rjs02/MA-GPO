@@ -6,7 +6,7 @@ For each response in the UltraFeedback test set:
   - r_eff(y|x): win-rate against dataset responses from GPM (Condorcet proxy)
   - inflation: rank difference between BT and effective reward rankings
 
-Also loads raw UltraFeedback dimension annotations for interpretability.
+Parallelized: RM runs on cuda:0, PM runs on cuda:1 concurrently.
 
 Usage:
     python experiments/borda_inflation/compute_inflation.py \
@@ -20,11 +20,13 @@ import argparse
 import json
 import pickle
 import sys
+import traceback
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 
@@ -34,19 +36,16 @@ from eval.evaluate_trained_models_ultrafeedback import (
     load_reward_model,
     get_response_reward,
     compute_preference_matrix_batched,
-    DEVICE,
 )
 
 # UltraFeedback dimensions
 DIMENSIONS = ["instruction_following", "honesty", "truthfulness", "helpfulness"]
 
 
-def load_ultrafeedback_raw_annotations(full_dataset_name="openbmb/UltraFeedback"):
-    """Load raw per-response dimension scores from UltraFeedback.
+# ── DATA LOADING ──────────────────────────────────────────────────────────────
 
-    Returns:
-        annotations: dict[instruction] -> list of {response, scores_by_dim}
-    """
+def load_ultrafeedback_raw_annotations(full_dataset_name="openbmb/UltraFeedback"):
+    """Load raw per-response dimension scores from UltraFeedback."""
     print(f"Loading raw UltraFeedback annotations from {full_dataset_name}...")
     dataset = load_dataset(full_dataset_name, split="train")
 
@@ -68,7 +67,6 @@ def load_ultrafeedback_raw_annotations(full_dataset_name="openbmb/UltraFeedback"
                 "response": completion["response"],
                 "scores": scores,
             })
-
         annotations[instruction] = response_data
 
     print(f"  Loaded annotations for {len(annotations)} prompts")
@@ -76,14 +74,9 @@ def load_ultrafeedback_raw_annotations(full_dataset_name="openbmb/UltraFeedback"
 
 
 def load_test_data_grouped(data_dir):
-    """Load UltraFeedback test split grouped by prompt.
-
-    Returns:
-        prompt_groups: dict[prompt_text] -> list of (chosen, rejected) pairs
-    """
+    """Load UltraFeedback test split grouped by prompt."""
     test_path = Path(data_dir) / "pref_test"
     if not test_path.exists():
-        # Try without pref_ prefix
         test_path = Path(data_dir)
 
     print(f"Loading test data from {test_path}...")
@@ -95,7 +88,6 @@ def load_test_data_grouped(data_dir):
         chosen = sample["chosen"]
         rejected = sample["rejected"]
 
-        # Extract text from structured format
         if isinstance(prompt, list):
             prompt = prompt[0].get("content", str(prompt[0]))
         if isinstance(chosen, list):
@@ -109,129 +101,197 @@ def load_test_data_grouped(data_dir):
     return dict(prompt_groups)
 
 
-def compute_prompt_results(
-    rm_model, rm_tokenizer, rm_dim, rm_tau,
-    pm_model, pm_tokenizer, pm_dim, pm_tau,
-    prompt, pairs, annotations_for_prompt,
-):
-    """Compute all Borda inflation metrics for a single prompt.
+def prepare_prompt_responses(prompt_groups, max_responses=100):
+    """Pre-extract unique responses per prompt, filtering by size.
 
-    Returns dict with per-response data or None if insufficient responses.
+    Returns list of (prompt, responses_list, pairs) tuples.
     """
-    # Extract unique responses
-    responses = set()
-    for chosen, rejected in pairs:
-        responses.add(chosen)
-        responses.add(rejected)
-    responses = sorted(list(responses))
-    n = len(responses)
+    prepared = []
+    skipped = 0
+    for prompt, pairs in prompt_groups.items():
+        responses = set()
+        for c, r in pairs:
+            responses.add(c)
+            responses.add(r)
+        if len(responses) > max_responses or len(responses) < 3:
+            skipped += 1
+            continue
+        prepared.append((prompt, sorted(list(responses)), pairs))
+    return prepared, skipped
 
-    if n < 3:
-        return None
 
-    # --- RM: scalar BT rewards ---
-    rm_rewards = []
-    for resp in responses:
-        r = get_response_reward(rm_model, rm_tokenizer, prompt, resp, DEVICE)
-        rm_rewards.append(r.item())
-    rm_rewards = np.array(rm_rewards)
+# ── GPU WORKER FUNCTIONS ──────────────────────────────────────────────────────
 
-    # --- PM: full pairwise preference matrix ---
-    pm_pref_matrix = compute_preference_matrix_batched(
-        pm_model, pm_tokenizer, responses, prompt, pm_dim, pm_tau, DEVICE
-    )
+def rm_worker(checkpoint, tau, prompts_data, device, output_path):
+    """Worker process: compute RM rewards + RM pref matrices on a dedicated GPU.
 
-    # --- RM: preference matrix (for Borda from matrix comparison) ---
-    rm_pref_matrix = compute_preference_matrix_batched(
-        rm_model, rm_tokenizer, responses, prompt, rm_dim, rm_tau, DEVICE
-    )
+    Saves results to output_path as pickle.
+    """
+    try:
+        print(f"[RM worker] Loading model on {device}...")
+        model, tokenizer, dim, _ = load_reward_model(checkpoint, tau, device=device)
+        assert dim == 1, f"Expected RM dim=1, got {dim}"
 
-    # --- Borda scores (row sums of preference matrices) ---
-    rm_borda = rm_pref_matrix.sum(axis=1)  # from RM matrix
-    pm_borda = pm_pref_matrix.sum(axis=1)  # from PM matrix (for cross-check)
+        results = {}
+        for prompt, responses, _pairs in tqdm(prompts_data, desc=f"[RM {device}]"):
+            # Scalar rewards
+            rewards = []
+            for resp in responses:
+                r = get_response_reward(model, tokenizer, prompt, resp, device)
+                rewards.append(r.item())
 
-    # --- Effective rewards: win-rate against dataset responses ---
-    # r_eff(y_i) = (1/N) * sum_j P_PM[i,j]  (includes self-comparison P[i,i]=0.5)
-    effective_rewards = pm_pref_matrix.mean(axis=1)
+            # Preference matrix
+            pref_matrix = compute_preference_matrix_batched(
+                model, tokenizer, responses, prompt, dim, tau, device
+            )
 
-    # --- Rankings ---
-    rm_ranking = np.argsort(-rm_rewards)  # highest reward first
-    eff_ranking = np.argsort(-effective_rewards)  # highest win-rate first
+            results[prompt] = {
+                "rewards": np.array(rewards),
+                "pref_matrix": pref_matrix,
+            }
 
-    # Rank positions (0-indexed, lower = better)
-    rm_ranks = np.empty_like(rm_ranking)
-    rm_ranks[rm_ranking] = np.arange(n)
-    eff_ranks = np.empty_like(eff_ranking)
-    eff_ranks[eff_ranking] = np.arange(n)
+        # Save to disk (avoids large pickle through mp queue)
+        with open(output_path, "wb") as f:
+            pickle.dump(results, f)
+        print(f"[RM worker] Done. Saved {len(results)} prompts to {output_path}")
 
-    # --- Inflation score: rank difference ---
-    # Positive = BT ranks higher than effective reward (BT overestimates)
-    inflation = eff_ranks - rm_ranks  # if eff_rank > rm_rank, BT overestimates
+    except Exception as e:
+        print(f"[RM worker] FATAL ERROR: {e}")
+        traceback.print_exc()
+        # Write empty results so main process doesn't hang waiting for file
+        with open(output_path, "wb") as f:
+            pickle.dump({"__error__": str(e)}, f)
+        raise
 
-    # --- Condorcet winner detection ---
-    # Response i is Condorcet winner if P_PM[i,j] > 0.5 for all j != i
-    condorcet_winner = None
-    for i in range(n):
-        if all(pm_pref_matrix[i, j] > 0.5 for j in range(n) if j != i):
-            condorcet_winner = i
-            break
 
-    # --- Copeland scores ---
-    copeland = np.array([sum(1 for j in range(n) if j != i and pm_pref_matrix[i, j] > 0.5) for i in range(n)])
+def pm_worker(checkpoint, tau, prompts_data, device, output_path):
+    """Worker process: compute PM pref matrices on a dedicated GPU.
 
-    # --- Top response comparison ---
-    bt_winner = int(rm_ranking[0])
-    pm_winner = int(eff_ranking[0])
-    agree = bt_winner == pm_winner
+    Saves results to output_path as pickle.
+    """
+    try:
+        print(f"[PM worker] Loading model on {device}...")
+        model, tokenizer, dim, _ = load_reward_model(checkpoint, tau, device=device)
+        assert dim > 1, f"Expected PM dim>1, got {dim}"
 
-    # --- Dimension annotations ---
-    dim_scores = {}
-    if annotations_for_prompt:
-        # Match responses to annotations by text content
-        anno_map = {a["response"]: a["scores"] for a in annotations_for_prompt}
-        for i, resp in enumerate(responses):
-            # Try to match (may need fuzzy matching)
-            if resp in anno_map:
-                dim_scores[i] = anno_map[resp]
-            else:
-                # Try prefix matching (responses may be truncated)
-                for anno_resp, scores in anno_map.items():
-                    if resp[:200] == anno_resp[:200]:
-                        dim_scores[i] = scores
-                        break
+        results = {}
+        for prompt, responses, _pairs in tqdm(prompts_data, desc=f"[PM {device}]"):
+            pref_matrix = compute_preference_matrix_batched(
+                model, tokenizer, responses, prompt, dim, tau, device
+            )
+            results[prompt] = {
+                "pref_matrix": pref_matrix,
+            }
 
-    # --- Response lengths ---
-    lengths = np.array([len(resp.split()) for resp in responses])
+        with open(output_path, "wb") as f:
+            pickle.dump(results, f)
+        print(f"[PM worker] Done. Saved {len(results)} prompts to {output_path}")
 
-    return {
-        "prompt": prompt,
-        "responses": responses,
-        "n_responses": n,
-        # RM outputs
-        "rm_rewards": rm_rewards,
-        "rm_pref_matrix": rm_pref_matrix,
-        "rm_borda": rm_borda,
-        "rm_ranking": rm_ranking,
-        "rm_ranks": rm_ranks,
-        # PM outputs
-        "pm_pref_matrix": pm_pref_matrix,
-        "pm_borda": pm_borda,
-        "effective_rewards": effective_rewards,
-        "eff_ranking": eff_ranking,
-        "eff_ranks": eff_ranks,
-        # Social choice
-        "condorcet_winner": condorcet_winner,
-        "copeland": copeland,
-        "bt_winner": bt_winner,
-        "pm_winner": pm_winner,
-        "agree": agree,
+    except Exception as e:
+        print(f"[PM worker] FATAL ERROR: {e}")
+        traceback.print_exc()
+        with open(output_path, "wb") as f:
+            pickle.dump({"__error__": str(e)}, f)
+        raise
+
+
+# ── MERGING AND SOCIAL CHOICE ────────────────────────────────────────────────
+
+def merge_and_compute_social_choice(rm_results, pm_results, prompts_data, annotations):
+    """Merge RM and PM results and compute social choice metrics."""
+    all_results = []
+
+    for prompt, responses, pairs in tqdm(prompts_data, desc="Merging results"):
+        if prompt not in rm_results or prompt not in pm_results:
+            continue
+
+        rm = rm_results[prompt]
+        pm = pm_results[prompt]
+        n = len(responses)
+
+        rm_rewards = rm["rewards"]
+        rm_pref_matrix = rm["pref_matrix"]
+        pm_pref_matrix = pm["pref_matrix"]
+
+        # Borda scores (row sums)
+        rm_borda = rm_pref_matrix.sum(axis=1)
+        pm_borda = pm_pref_matrix.sum(axis=1)
+
+        # Effective rewards (win-rate)
+        effective_rewards = pm_pref_matrix.mean(axis=1)
+
+        # Rankings
+        rm_ranking = np.argsort(-rm_rewards)
+        eff_ranking = np.argsort(-effective_rewards)
+
+        rm_ranks = np.empty_like(rm_ranking)
+        rm_ranks[rm_ranking] = np.arange(n)
+        eff_ranks = np.empty_like(eff_ranking)
+        eff_ranks[eff_ranking] = np.arange(n)
+
         # Inflation
-        "inflation": inflation,
-        # Annotations
-        "dim_scores": dim_scores,
-        "lengths": lengths,
-    }
+        inflation = eff_ranks - rm_ranks
 
+        # Condorcet winner
+        condorcet_winner = None
+        for i in range(n):
+            if all(pm_pref_matrix[i, j] > 0.5 for j in range(n) if j != i):
+                condorcet_winner = i
+                break
+
+        # Copeland
+        copeland = np.array([
+            sum(1 for j in range(n) if j != i and pm_pref_matrix[i, j] > 0.5)
+            for i in range(n)
+        ])
+
+        bt_winner = int(rm_ranking[0])
+        pm_winner = int(eff_ranking[0])
+
+        # Dimension annotations
+        dim_scores = {}
+        anno = annotations.get(prompt, None)
+        if anno:
+            anno_map = {a["response"]: a["scores"] for a in anno}
+            for i, resp in enumerate(responses):
+                if resp in anno_map:
+                    dim_scores[i] = anno_map[resp]
+                else:
+                    for anno_resp, scores in anno_map.items():
+                        if resp[:200] == anno_resp[:200]:
+                            dim_scores[i] = scores
+                            break
+
+        lengths = np.array([len(resp.split()) for resp in responses])
+
+        all_results.append({
+            "prompt": prompt,
+            "responses": responses,
+            "n_responses": n,
+            "rm_rewards": rm_rewards,
+            "rm_pref_matrix": rm_pref_matrix,
+            "rm_borda": rm_borda,
+            "rm_ranking": rm_ranking,
+            "rm_ranks": rm_ranks,
+            "pm_pref_matrix": pm_pref_matrix,
+            "pm_borda": pm_borda,
+            "effective_rewards": effective_rewards,
+            "eff_ranking": eff_ranking,
+            "eff_ranks": eff_ranks,
+            "condorcet_winner": condorcet_winner,
+            "copeland": copeland,
+            "bt_winner": bt_winner,
+            "pm_winner": pm_winner,
+            "agree": bt_winner == pm_winner,
+            "inflation": inflation,
+            "dim_scores": dim_scores,
+            "lengths": lengths,
+        })
+
+    return all_results
+
+
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Compute Borda inflation scores")
@@ -253,71 +313,100 @@ def main():
                         help="Skip prompts with more than N responses")
     parser.add_argument("--skip_annotations", action="store_true",
                         help="Skip loading raw UltraFeedback annotations (faster)")
+    parser.add_argument("--rm_device", type=str, default="cuda:0",
+                        help="GPU device for RM (default: cuda:0)")
+    parser.add_argument("--pm_device", type=str, default="cuda:1",
+                        help="GPU device for PM (default: cuda:1)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # === Load models ===
-    print("=" * 70)
-    print("LOADING RM (Bradley-Terry)")
-    print("=" * 70)
-    rm_model, rm_tokenizer, rm_dim, rm_tau = load_reward_model(
-        args.rm_checkpoint, args.rm_tau
-    )
-    assert rm_dim == 1, f"Expected RM dim=1, got {rm_dim}"
-
-    print("=" * 70)
-    print("LOADING PM (General Preference Model)")
-    print("=" * 70)
-    pm_model, pm_tokenizer, pm_dim, pm_tau = load_reward_model(
-        args.pm_checkpoint, args.pm_tau
-    )
-    assert pm_dim > 1, f"Expected PM dim>1, got {pm_dim}"
-
-    # === Load data ===
+    # === Load and prepare data (main process, CPU) ===
     prompt_groups = load_test_data_grouped(args.data_dir)
-
     if args.max_prompts:
         keys = list(prompt_groups.keys())[:args.max_prompts]
         prompt_groups = {k: prompt_groups[k] for k in keys}
 
-    # === Load raw annotations ===
+    prompts_data, skipped = prepare_prompt_responses(prompt_groups, args.max_responses)
+    print(f"Prepared {len(prompts_data)} prompts ({skipped} skipped)")
+
     annotations = {}
     if not args.skip_annotations:
         annotations = load_ultrafeedback_raw_annotations()
 
-    # === Compute inflation for each prompt ===
+    # === Launch RM and PM workers in parallel on separate GPUs ===
     print("=" * 70)
-    print(f"COMPUTING BORDA INFLATION ({len(prompt_groups)} prompts)")
+    print(f"LAUNCHING PARALLEL INFERENCE: RM on {args.rm_device}, PM on {args.pm_device}")
     print("=" * 70)
 
-    all_results = []
-    skipped = 0
+    mp.set_start_method("spawn", force=True)
 
-    for prompt, pairs in tqdm(prompt_groups.items(), desc="Computing inflation"):
-        # Check response count
-        responses = set()
-        for c, r in pairs:
-            responses.add(c)
-            responses.add(r)
-        if len(responses) > args.max_responses or len(responses) < 3:
-            skipped += 1
-            continue
+    rm_output = output_dir / "_rm_results.pkl"
+    pm_output = output_dir / "_pm_results.pkl"
 
-        # Get annotations for this prompt
-        anno = annotations.get(prompt, None)
+    rm_proc = mp.Process(
+        target=rm_worker,
+        args=(args.rm_checkpoint, args.rm_tau, prompts_data, args.rm_device, str(rm_output)),
+        name="RM-worker",
+    )
+    pm_proc = mp.Process(
+        target=pm_worker,
+        args=(args.pm_checkpoint, args.pm_tau, prompts_data, args.pm_device, str(pm_output)),
+        name="PM-worker",
+    )
 
-        result = compute_prompt_results(
-            rm_model, rm_tokenizer, rm_dim, rm_tau,
-            pm_model, pm_tokenizer, pm_dim, pm_tau,
-            prompt, pairs, anno,
-        )
+    rm_proc.start()
+    pm_proc.start()
 
-        if result is not None:
-            all_results.append(result)
+    print(f"  RM worker PID: {rm_proc.pid}")
+    print(f"  PM worker PID: {pm_proc.pid}")
 
-    print(f"\nProcessed {len(all_results)} prompts, skipped {skipped}")
+    # Wait for both to finish
+    rm_proc.join()
+    pm_proc.join()
+
+    # Check exit codes
+    if rm_proc.exitcode != 0:
+        print(f"FATAL: RM worker exited with code {rm_proc.exitcode}")
+        sys.exit(1)
+    if pm_proc.exitcode != 0:
+        print(f"FATAL: PM worker exited with code {pm_proc.exitcode}")
+        sys.exit(1)
+
+    print("Both workers completed successfully.")
+
+    # === Load worker results ===
+    print("Loading worker results...")
+    with open(rm_output, "rb") as f:
+        rm_results = pickle.load(f)
+    with open(pm_output, "rb") as f:
+        pm_results = pickle.load(f)
+
+    if "__error__" in rm_results:
+        print(f"FATAL: RM worker error: {rm_results['__error__']}")
+        sys.exit(1)
+    if "__error__" in pm_results:
+        print(f"FATAL: PM worker error: {pm_results['__error__']}")
+        sys.exit(1)
+
+    print(f"  RM results: {len(rm_results)} prompts")
+    print(f"  PM results: {len(pm_results)} prompts")
+
+    # Clean up temp files
+    rm_output.unlink()
+    pm_output.unlink()
+
+    # === Merge and compute social choice metrics (CPU) ===
+    print("=" * 70)
+    print("COMPUTING SOCIAL CHOICE METRICS")
+    print("=" * 70)
+    all_results = merge_and_compute_social_choice(
+        rm_results, pm_results, prompts_data, annotations
+    )
+
+    # Free memory
+    del rm_results, pm_results
 
     # === Aggregate statistics ===
     n_agree = sum(1 for r in all_results if r["agree"])
@@ -326,13 +415,13 @@ def main():
     n_cycles = len(all_results) - n_condorcet
 
     print(f"\n=== Summary ===")
-    print(f"Total prompts:     {len(all_results)}")
-    print(f"BT=PM agree:       {n_agree} ({100*n_agree/len(all_results):.1f}%)")
-    print(f"BT!=PM disagree:   {n_disagree} ({100*n_disagree/len(all_results):.1f}%)")
-    print(f"Condorcet winner:  {n_condorcet} ({100*n_condorcet/len(all_results):.1f}%)")
+    print(f"Total prompts:      {len(all_results)}")
+    print(f"BT=PM agree:        {n_agree} ({100*n_agree/len(all_results):.1f}%)")
+    print(f"BT!=PM disagree:    {n_disagree} ({100*n_disagree/len(all_results):.1f}%)")
+    print(f"Condorcet winner:   {n_condorcet} ({100*n_condorcet/len(all_results):.1f}%)")
     print(f"Cycles (no winner): {n_cycles} ({100*n_cycles/len(all_results):.1f}%)")
 
-    # Flatten per-response data for easier analysis
+    # Flatten per-response data
     flat_data = []
     for r in all_results:
         for i, resp in enumerate(r["responses"]):
@@ -353,20 +442,17 @@ def main():
                 "is_condorcet_winner": i == r["condorcet_winner"],
                 "prompt_agrees": r["agree"],
             }
-            # Add dimension scores
             if i in r["dim_scores"]:
                 for dim in DIMENSIONS:
                     entry[f"dim_{dim}"] = r["dim_scores"][i].get(dim)
             flat_data.append(entry)
 
     # === Save results ===
-    # Full results (pickle, includes matrices)
     pickle_path = output_dir / "inflation_results.pkl"
     with open(pickle_path, "wb") as f:
         pickle.dump({"per_prompt": all_results, "flat": flat_data}, f)
     print(f"\nSaved full results to {pickle_path}")
 
-    # Summary stats (JSON, lightweight)
     summary = {
         "n_prompts": len(all_results),
         "n_agree": n_agree,
@@ -386,7 +472,6 @@ def main():
         json.dump(summary, f, indent=2)
     print(f"Saved summary to {json_path}")
 
-    # Flat data for pandas (JSON lines)
     jsonl_path = output_dir / "inflation_flat.jsonl"
     with open(jsonl_path, "w") as f:
         for entry in flat_data:

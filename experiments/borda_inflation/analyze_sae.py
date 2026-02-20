@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Track B: SAE-based interpretability for Borda inflation.
 
-Uses pretrained Llama Scope SAEs (fnlp/Llama-Scope) to extract monosemantic
-features from the RM backbone and correlate them with Borda inflation scores.
+Uses pretrained Llama Scope SAEs (fnlp/Llama3_1-8B-Base-LXR-8x) to extract
+monosemantic features from the RM backbone and correlate them with Borda
+inflation scores.
 
 Workflow:
 1. Load trained RM model and Llama Scope SAE for a chosen layer
@@ -10,27 +11,134 @@ Workflow:
 3. Correlate each SAE feature with Borda inflation score
 4. Identify and interpret top features
 
-Requires: pip install sae-lens transformer-lens
-
 Usage:
     python experiments/borda_inflation/analyze_sae.py \
         --rm_checkpoint /path/to/rm/checkpoint \
         --results_dir experiments/borda_inflation/results \
-        --output_dir experiments/borda_inflation/results/sae_analysis \
         --layer 16
 """
 
 import argparse
 import json
-import pickle
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 from scipy.stats import spearmanr
 from tqdm import tqdm
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+class LlamaScopeSAE(nn.Module):
+    """Llama Scope SAE (JumpReLU variant).
+
+    Loads from fnlp/Llama3_1-8B-Base-LXR-{expansion}x checkpoints.
+    Architecture: x -> normalize -> encode -> jumprelu -> decode
+    """
+
+    def __init__(self, d_model, d_sae, threshold, dataset_avg_norm_in=None):
+        super().__init__()
+        self.d_model = d_model
+        self.d_sae = d_sae
+        self.threshold = threshold
+        self.dataset_avg_norm_in = dataset_avg_norm_in
+
+        self.encoder = nn.Linear(d_model, d_sae)
+        self.decoder = nn.Linear(d_sae, d_model, bias=True)
+
+    def normalize(self, x):
+        """Apply dataset-wise norm activation (matches Llama Scope training)."""
+        if self.dataset_avg_norm_in is not None:
+            return x * (self.dataset_avg_norm_in / x.norm(dim=-1, keepdim=True))
+        return x
+
+    def encode(self, x):
+        """Encode hidden states to sparse SAE features."""
+        x = self.normalize(x)
+        x = x - self.decoder.bias  # pre-encoder bias subtraction
+        z = self.encoder(x)
+        # JumpReLU: zero out activations below threshold
+        z = z * (z > self.threshold).float()
+        return z
+
+    def forward(self, x):
+        z = self.encode(x)
+        x_hat = self.decoder(z)
+        return x_hat, z
+
+
+def load_sae(layer, sae_width="32k"):
+    """Load pretrained Llama Scope SAE for a given layer.
+
+    Downloads from fnlp/Llama3_1-8B-Base-LXR-{expansion}x on HuggingFace.
+
+    Args:
+        layer: int, which transformer layer (0-31)
+        sae_width: "32k" or "128k" features
+
+    Returns:
+        sae: loaded LlamaScopeSAE model on DEVICE
+    """
+    from huggingface_hub import hf_hub_download
+
+    expansion = "8x" if sae_width == "32k" else "32x"
+    repo_id = f"fnlp/Llama3_1-8B-Base-LXR-{expansion}"
+    subdir = f"Llama3_1-8B-Base-L{layer}R-{expansion}"
+
+    print(f"Loading SAE from {repo_id}/{subdir}...")
+
+    # Download hyperparams
+    hp_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=f"{subdir}/hyperparams.json",
+    )
+    with open(hp_path) as f:
+        hp = json.load(f)
+
+    d_model = hp["d_model"]
+    d_sae = hp["d_sae"]
+    threshold = hp.get("jump_relu_threshold", 0.0)
+    dataset_avg_norm = hp.get("dataset_average_activation_norm", {}).get("in", None)
+
+    print(f"  d_model={d_model}, d_sae={d_sae}, threshold={threshold:.4f}")
+    print(f"  activation: {hp.get('act_fn', 'unknown')}, norm: {dataset_avg_norm}")
+
+    # Download weights
+    weights_path = hf_hub_download(
+        repo_id=repo_id,
+        filename=f"{subdir}/checkpoints/final.safetensors",
+    )
+
+    # Load safetensors
+    from safetensors.torch import load_file
+    state_dict = load_file(weights_path)
+
+    # Build SAE
+    sae = LlamaScopeSAE(d_model, d_sae, threshold, dataset_avg_norm)
+
+    # Map state dict keys (OpenMOSS format -> our format)
+    # OpenMOSS keys: encoder.weight, encoder.bias, decoder.weight, decoder.bias
+    new_sd = {}
+    for k, v in state_dict.items():
+        if k in ("encoder.weight", "encoder.bias", "decoder.weight", "decoder.bias"):
+            new_sd[k] = v
+        else:
+            print(f"  Warning: unexpected key in SAE checkpoint: {k}")
+            new_sd[k] = v
+
+    sae.load_state_dict(new_sd, strict=False)
+    sae = sae.to(DEVICE).eval()
+
+    # Verify
+    test_input = torch.randn(1, d_model, device=DEVICE)
+    with torch.no_grad():
+        test_z = sae.encode(test_input)
+    n_active = (test_z > 0).sum().item()
+    print(f"  SAE loaded successfully ({n_active} active features on random input)")
+
+    return sae
 
 
 def load_inflation_data(results_dir):
@@ -46,51 +154,6 @@ def load_inflation_data(results_dir):
 
     print(f"  {len(records)} responses")
     return records
-
-
-def load_sae(layer, sae_width="32k"):
-    """Load pretrained Llama Scope SAE for a given layer.
-
-    Uses the fnlp/Llama-Scope collection on HuggingFace.
-
-    Args:
-        layer: int, which transformer layer (0-31 for Llama-3-8B)
-        sae_width: "32k" or "128k" features
-
-    Returns:
-        sae: loaded SAE model
-    """
-    try:
-        from sae_lens import SAE
-    except ImportError:
-        raise ImportError(
-            "sae-lens required. Install with: pip install sae-lens"
-        )
-
-    # Llama Scope naming convention
-    # See: https://huggingface.co/fnlp/Llama-Scope
-    sae_id = f"fnlp/Llama-Scope-L{layer}-{sae_width}"
-    print(f"Loading SAE: {sae_id}...")
-
-    try:
-        sae = SAE.from_pretrained(
-            release=f"fnlp/Llama-Scope",
-            sae_id=f"L{layer}_{sae_width}",
-            device=DEVICE,
-        )
-    except Exception as e:
-        print(f"  Failed with SAELens default loading: {e}")
-        print(f"  Trying alternative loading...")
-        # Try direct HuggingFace loading
-        from huggingface_hub import hf_hub_download
-        sae_path = hf_hub_download(
-            repo_id="fnlp/Llama-Scope",
-            filename=f"L{layer}_{sae_width}/sae_weights.safetensors",
-        )
-        sae = SAE.from_pretrained(sae_path, device=DEVICE)
-
-    print(f"  SAE loaded: {sae_width} features, layer {layer}")
-    return sae
 
 
 def extract_hidden_states(model, tokenizer, prompts_and_responses, layer, batch_size=4):
@@ -206,7 +269,7 @@ def correlate_features_with_inflation(feature_acts, inflation_scores, min_activa
     min_activation_count responses.
 
     Returns:
-        results: list of (feature_idx, spearman_rho, p_value, n_active)
+        results: list of dicts sorted by absolute correlation
     """
     n_features = feature_acts.shape[1]
     inflation = np.array(inflation_scores)

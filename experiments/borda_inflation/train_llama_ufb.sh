@@ -7,13 +7,17 @@
 #
 # Uses UltraFeedback multidimensional dataset.
 # Runs on Clariden cluster with 4x GH200 (97GB each).
+#
+# Resume from checkpoint:
+#   TRAIN_MODE=pm RESUME_FROM=/path/to/existing/run/dir sbatch submit_train.sh
+#   The script will find the latest global_step_* in that dir's checkpoints/.
 
 set -euxo pipefail
 
 # === Configuration ===
 
 # Base model
-BASE_MODEL="${BASE_MODEL:-meta-llama/Meta-Llama-3-8B-Instruct}"
+BASE_MODEL="${BASE_MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 
 # Data paths — UltraFeedback multidimensional (from build_ufb_data.py)
 DATA_DIR="${DATA_DIR:-${MA_SCRATCH_IOPS}/data/ufb_multidim}"
@@ -27,20 +31,23 @@ BASE_OUTPUT_DIR="${MA_SCRATCH_CAP:-/capstor/scratch/cscs/rosieber/MA}/runs/borda
 # Which model(s) to train: "rm", "pm", or "both"
 TRAIN_MODE="${TRAIN_MODE:-both}"
 
+# Resume from an existing run directory (empty = fresh training)
+RESUME_FROM="${RESUME_FROM:-}"
+
 # Batch config (4x GH200)
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-8}"
-ACCUMULATED_GRADIENT="${ACCUMULATED_GRADIENT:-2}"
+ACCUMULATED_GRADIENT="${ACCUMULATED_GRADIENT:-1}"
 EFFECTIVE_BATCH_SIZE=$((MICRO_BATCH_SIZE * ACCUMULATED_GRADIENT * 4))
 
 # Training
 MAX_EPOCHS="${MAX_EPOCHS:-1}"
-LEARNING_RATE="${LEARNING_RATE:-1e-5}"
+LEARNING_RATE="${LEARNING_RATE:-5e-6}"
 MAX_LEN="${MAX_LEN:-3072}"
 
 # Logging
-SAVE_STEPS="${SAVE_STEPS:-100}"
-LOGGING_STEPS="${LOGGING_STEPS:-5}"
-EVAL_STEPS="${EVAL_STEPS:-50}"
+SAVE_STEPS="${SAVE_STEPS:-1000}"
+LOGGING_STEPS="${LOGGING_STEPS:-10}"
+EVAL_STEPS="${EVAL_STEPS:-200}"
 WANDB_PROJECT="${WANDB_PROJECT:-Borda-Inflation}"
 
 # === Setup ===
@@ -52,6 +59,7 @@ echo ""
 echo "Base model: ${BASE_MODEL}"
 echo "Data: ${DATA_DIR}"
 echo "Train mode: ${TRAIN_MODE}"
+echo "Resume from: ${RESUME_FROM:-<fresh training>}"
 echo ""
 
 # Verify data exists
@@ -90,7 +98,43 @@ train_model() {
     local is_gpo=$3
     local model_name=$4
 
-    local OUTPUT_DIR="${BASE_OUTPUT_DIR}/llama3-8b-${model_name}-${DATE}_${SLURM_JOB_ID:-0}"
+    # --- Determine output directory and checkpoint resume ---
+    local OUTPUT_DIR
+    local RESUME_FLAGS=""
+
+    if [ -n "${RESUME_FROM}" ]; then
+        # Resuming: reuse the existing run directory
+        # Accept both the run dir and the checkpoints/ subdir
+        OUTPUT_DIR="${RESUME_FROM%/checkpoints}"
+
+        if [ ! -d "${OUTPUT_DIR}/checkpoints" ]; then
+            echo "ERROR: No checkpoints/ directory in ${OUTPUT_DIR}"
+            exit 1
+        fi
+
+        # Find the latest checkpoint
+        local LATEST_CKPT
+        if [ -f "${OUTPUT_DIR}/checkpoints/latest" ]; then
+            LATEST_CKPT=$(cat "${OUTPUT_DIR}/checkpoints/latest")
+            echo "Found 'latest' file pointing to: ${LATEST_CKPT}"
+        else
+            LATEST_CKPT=$(ls -d "${OUTPUT_DIR}"/checkpoints/global_step_* 2>/dev/null | sort -t_ -k3 -n | tail -1)
+            LATEST_CKPT=$(basename "${LATEST_CKPT}")
+            echo "No 'latest' file, auto-detected: ${LATEST_CKPT}"
+        fi
+
+        if [ -z "${LATEST_CKPT}" ]; then
+            echo "ERROR: No global_step_* checkpoints found in ${OUTPUT_DIR}/checkpoints/"
+            exit 1
+        fi
+
+        echo "Resuming from checkpoint: ${OUTPUT_DIR}/checkpoints/${LATEST_CKPT}"
+        RESUME_FLAGS="--load_checkpoint"
+    else
+        # Fresh training: create new output directory
+        OUTPUT_DIR="${BASE_OUTPUT_DIR}/llama3-8b-${model_name}-${DATE}_${SLURM_JOB_ID:-0}"
+    fi
+
     mkdir -p "${OUTPUT_DIR}"/{checkpoints,logs}
 
     local TRITON_CACHE_DIR="${OUTPUT_DIR}/triton_cache"
@@ -103,6 +147,9 @@ train_model() {
     echo "========================================"
     echo "Training ${model_name} (dim=${dim}, tau=${tau})"
     echo "Output: ${OUTPUT_DIR}"
+    if [ -n "${RESUME_FLAGS}" ]; then
+        echo "RESUMING from existing checkpoint"
+    fi
     echo "========================================"
     echo ""
 
@@ -116,6 +163,7 @@ train_model() {
         \
         --dataset "${TRAIN_DATA}" \
         --eval_dataset "${VAL_DATA}" \
+	--max_eval_samples 256 \
         --use_separate_prompt \
         --max_len ${MAX_LEN} \
         \
@@ -138,17 +186,18 @@ train_model() {
         --ckpt_path "${OUTPUT_DIR}/checkpoints" \
         --save_steps ${SAVE_STEPS} \
         --eval_steps ${EVAL_STEPS} \
+        ${RESUME_FLAGS} \
         \
         --logging_steps ${LOGGING_STEPS} \
         --use_wandb True \
         --wandb_org rjs02-eth-z-rich \
         --wandb_project "${WANDB_PROJECT}" \
         --wandb_run_name "${WANDB_RUN_NAME}" \
-        2>&1 | tee "${OUTPUT_DIR}/logs/training.log"
+        2>&1 | tee -a "${OUTPUT_DIR}/logs/training.log"
 
     echo "Finished training ${model_name}: ${OUTPUT_DIR}"
-    # Save the output path for downstream scripts
-    echo "${OUTPUT_DIR}" >> "${BASE_OUTPUT_DIR}/trained_models.txt"
+    # Save the output path for downstream scripts (named, so parallel jobs work)
+    echo "${OUTPUT_DIR}" > "${BASE_OUTPUT_DIR}/${model_name}_checkpoint.txt"
 }
 
 # === Run training ===
@@ -165,4 +214,3 @@ fi
 echo ""
 echo "=== All Training Complete ==="
 echo "End time: $(date)"
-echo "Trained models saved to: ${BASE_OUTPUT_DIR}/trained_models.txt"

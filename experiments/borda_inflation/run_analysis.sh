@@ -1,41 +1,28 @@
 #!/bin/bash
-#SBATCH --job-name=borda-analysis
-#SBATCH --account=a166
-#SBATCH --time=06:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=72
-#SBATCH --partition=normal
-#SBATCH --output=/users/rosieber/MA/logs/borda-analysis-%j.out
-#SBATCH --error=/users/rosieber/MA/logs/borda-analysis-%j.err
-
-# Borda Inflation Experiment: Analysis Pipeline (Steps 1-5)
-# Runs after training is complete.
+# Borda Inflation Experiment: Analysis Pipeline (Steps 1-4)
+# Called by submit_analysis.sh via srun --environment=openrlhf.
 #
-# Usage:
-#   sbatch experiments/borda_inflation/run_analysis.sh
-#
-# Requires: RM_CHECKPOINT and PM_CHECKPOINT environment variables pointing to
-# trained model directories. These are written to trained_models.txt by
-# train_llama_ufb.sh.
+# Can also run interactively:
+#   bash experiments/borda_inflation/run_analysis.sh
 
 set -euxo pipefail
 
 # === Configuration ===
 BASE_DIR="${MA_SCRATCH_CAP:-/capstor/scratch/cscs/rosieber/MA}/runs/borda_inflation"
 
-# Model checkpoints — override with env vars or read from trained_models.txt
+# Model checkpoints — override with env vars or read from per-model checkpoint files
 if [ -z "${RM_CHECKPOINT:-}" ] || [ -z "${PM_CHECKPOINT:-}" ]; then
-    if [ -f "${BASE_DIR}/trained_models.txt" ]; then
-        echo "Reading model paths from ${BASE_DIR}/trained_models.txt"
-        # First line = RM, second line = PM
-        RM_CHECKPOINT=$(sed -n '1p' "${BASE_DIR}/trained_models.txt")
-        PM_CHECKPOINT=$(sed -n '2p' "${BASE_DIR}/trained_models.txt")
-        # Find the exported model checkpoint within each directory
-        RM_CHECKPOINT=$(ls -d "${RM_CHECKPOINT}"/checkpoints/global_step_* 2>/dev/null | tail -1)
-        PM_CHECKPOINT=$(ls -d "${PM_CHECKPOINT}"/checkpoints/global_step_* 2>/dev/null | tail -1)
+    if [ -f "${BASE_DIR}/rm_checkpoint.txt" ] && [ -f "${BASE_DIR}/pm_checkpoint.txt" ]; then
+        echo "Reading model paths from checkpoint files"
+        RM_DIR=$(cat "${BASE_DIR}/rm_checkpoint.txt")
+        PM_DIR=$(cat "${BASE_DIR}/pm_checkpoint.txt")
+        # Find the latest exported model checkpoint within each directory
+        RM_CHECKPOINT=$(ls -d "${RM_DIR}"/model_exports/global_step_* 2>/dev/null | tail -1)
+        PM_CHECKPOINT=$(ls -d "${PM_DIR}"/model_exports/global_step_* 2>/dev/null | tail -1)
     else
-        echo "ERROR: No trained models found. Set RM_CHECKPOINT and PM_CHECKPOINT or run training first."
+        echo "ERROR: No trained models found."
+        echo "Either set RM_CHECKPOINT and PM_CHECKPOINT env vars, or run training first."
+        echo "Expected: ${BASE_DIR}/rm_checkpoint.txt and ${BASE_DIR}/pm_checkpoint.txt"
         exit 1
     fi
 fi
@@ -70,7 +57,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
 cd "${MA_HOME:-/users/rosieber/MA}/MA-GPO"
 export PYTHONPATH="${PWD}:${PYTHONPATH:-}"
-
+pip install matplotlib pandas scipy statsmodels sae-lens
 nvidia-smi
 
 # ============================================================
