@@ -228,18 +228,12 @@ def main():
     print(f"  RM rewards: mean={all_rm.mean():.4f} std={all_rm.std():.4f} "
           f"min={all_rm.min():.4f} max={all_rm.max():.4f}")
 
-    pm_probs = np.concatenate([m["P_PM"].flatten() for m in merged])
-    pm_offdiag = pm_probs[~np.eye(merged[0]["P_PM"].shape[0], dtype=bool).flatten().tolist() *
-                          len(merged)]
-    # Simpler: collect off-diagonal
     pm_offdiag_vals = []
     for m in merged:
         P = m["P_PM"]
         K = P.shape[0]
-        for i in range(K):
-            for j in range(K):
-                if i != j:
-                    pm_offdiag_vals.append(P[i, j])
+        mask = ~np.eye(K, dtype=bool)
+        pm_offdiag_vals.extend(P[mask].tolist())
     pm_offdiag_vals = np.array(pm_offdiag_vals)
     print(f"  PM P[i,j] (off-diag): mean={pm_offdiag_vals.mean():.4f} "
           f"std={pm_offdiag_vals.std():.4f} "

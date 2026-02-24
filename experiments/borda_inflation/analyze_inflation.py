@@ -219,8 +219,9 @@ def analyze_prompt_data(eval_rec, infer_rec):
     winner_rm = int(np.argmax(borda_rm))
     winner_pm = int(np.argmax(borda_pm))
 
-    # Cross-prompt inflation: rank_RM - rank_emp_Borda per response
+    # Cross-prompt inflation: rank_model - rank_emp_Borda per response
     inflation = rank_rm.astype(int) - rank_emp_borda.astype(int)
+    inflation_pm = rank_pm.astype(int) - rank_emp_borda.astype(int)
 
     # Brier scores (off-diagonal pairs)
     pairs_rm_emp = []
@@ -254,12 +255,24 @@ def analyze_prompt_data(eval_rec, infer_rec):
         eps_emp = safe_logit(P_emp[i, k]) - safe_logit(P_emp[i, j]) - safe_logit(P_emp[j, k])
         lt_emp.append(abs(eps_emp))
 
-    # Kendall tau between rankings
+    # Kendall tau between all ranking pairs
     def safe_tau(a, b):
         if len(set(a)) == 1 or len(set(b)) == 1:
             return 0.0
         tau, _ = kendalltau(a, b)
         return tau if not np.isnan(tau) else 0.0
+
+    all_ranks = [rank_emp_borda, rank_emp_cope, rank_nash, rank_rm, rank_pm]
+    n_methods = len(all_ranks)
+    tau_matrix = np.zeros((n_methods, n_methods))
+    for a in range(n_methods):
+        for b in range(n_methods):
+            if a == b:
+                tau_matrix[a, b] = 1.0
+            elif a < b:
+                t = safe_tau(all_ranks[a], all_ranks[b])
+                tau_matrix[a, b] = t
+                tau_matrix[b, a] = t
 
     # Response lengths
     lengths = [len(r["text"].split()) for r in eval_rec["responses"]]
@@ -287,6 +300,7 @@ def analyze_prompt_data(eval_rec, infer_rec):
         "winner_rm": winner_rm,
         "winner_pm": winner_pm,
         "inflation": inflation,
+        "inflation_pm": inflation_pm,
         "brier_rm": brier_rm,
         "brier_pm": brier_pm,
         "p_dist_rm_bt": p_dist_rm_bt,
@@ -294,12 +308,7 @@ def analyze_prompt_data(eval_rec, infer_rec):
         "bt_distortion_pm": bt_distortion_pm,
         "lt_pm_abs": lt_pm,
         "lt_emp_abs": lt_emp,
-        "tau_rm_emp_borda": safe_tau(rank_rm, rank_emp_borda),
-        "tau_rm_emp_cope": safe_tau(rank_rm, rank_emp_cope),
-        "tau_rm_nash": safe_tau(rank_rm, rank_nash),
-        "tau_pm_emp_borda": safe_tau(rank_pm, rank_emp_borda),
-        "tau_pm_rm": safe_tau(rank_pm, rank_rm),
-        "tau_emp_borda_cope": safe_tau(rank_emp_borda, rank_emp_cope),
+        "tau_matrix": tau_matrix,
         "lengths": lengths,
     }
 
@@ -326,21 +335,9 @@ def compute_summary(results):
 
     winner_agreement /= n
 
-    # Kendall tau (averaged)
-    tau_keys = {
-        (0, 3): "tau_rm_emp_borda",
-        (0, 1): "tau_emp_borda_cope",
-        (3, 4): "tau_pm_rm",
-        (1, 3): "tau_rm_emp_cope",
-        (2, 3): "tau_rm_nash",
-        (0, 4): "tau_pm_emp_borda",
-    }
-
-    for (a, b), key in tau_keys.items():
-        vals = [r[key] for r in results]
-        kendall_tau_avg[a, b] = np.mean(vals)
-        kendall_tau_avg[b, a] = kendall_tau_avg[a, b]
-    np.fill_diagonal(kendall_tau_avg, 1.0)
+    # Kendall tau (averaged from per-prompt full matrices)
+    tau_matrices = np.array([r["tau_matrix"] for r in results])  # (n_prompts, 5, 5)
+    kendall_tau_avg = tau_matrices.mean(axis=0)
 
     # Aggregate scalars
     brier_rm_vals = [r["brier_rm"] for r in results]
@@ -357,13 +354,40 @@ def compute_summary(results):
         all_lt_pm.extend(r["lt_pm_abs"])
         all_lt_emp.extend(r["lt_emp_abs"])
 
-    # Inflation distribution
+    # Inflation distribution (RM)
     all_inflation = []
     for r in results:
         all_inflation.extend(r["inflation"].tolist())
     infl_counts = {}
     for v in all_inflation:
         infl_counts[v] = infl_counts.get(v, 0) + 1
+
+    # Inflation distribution (PM)
+    all_inflation_pm = []
+    for r in results:
+        all_inflation_pm.extend(r["inflation_pm"].tolist())
+    infl_pm_counts = {}
+    for v in all_inflation_pm:
+        infl_pm_counts[v] = infl_pm_counts.get(v, 0) + 1
+
+    # Per-prompt: RM vs PM disagreement rates with Emp.Borda
+    rm_disagree = 0
+    pm_disagree = 0
+    both_disagree = 0
+    rm_only_disagree = 0
+    pm_only_disagree = 0
+    pm_correct_rm_wrong = 0
+    rm_correct_pm_wrong = 0
+    for r in results:
+        rm_wrong = r["winner_rm"] != r["winner_emp_borda"]
+        pm_wrong = r["winner_pm"] != r["winner_emp_borda"]
+        rm_disagree += rm_wrong
+        pm_disagree += pm_wrong
+        both_disagree += (rm_wrong and pm_wrong)
+        rm_only_disagree += (rm_wrong and not pm_wrong)
+        pm_only_disagree += (not rm_wrong and pm_wrong)
+        pm_correct_rm_wrong += (rm_wrong and not pm_wrong)
+        rm_correct_pm_wrong += (not rm_wrong and pm_wrong)
 
     # Pairwise P_RM vs P_emp (for calibration scatter)
     all_p_rm = []
@@ -399,6 +423,18 @@ def compute_summary(results):
         "lt_emp_abs_mean": float(np.mean(all_lt_emp)),
         "lt_emp_abs_median": float(np.median(all_lt_emp)),
         "inflation_distribution": {str(k): v for k, v in sorted(infl_counts.items())},
+        "inflation_pm_distribution": {str(k): v for k, v in sorted(infl_pm_counts.items())},
+        "inflation_rm_mean": float(np.mean(all_inflation)),
+        "inflation_rm_std": float(np.std(all_inflation)),
+        "inflation_rm_abs_mean": float(np.mean(np.abs(all_inflation))),
+        "inflation_pm_mean": float(np.mean(all_inflation_pm)),
+        "inflation_pm_std": float(np.std(all_inflation_pm)),
+        "inflation_pm_abs_mean": float(np.mean(np.abs(all_inflation_pm))),
+        "winner_disagree_rm": rm_disagree,
+        "winner_disagree_pm": pm_disagree,
+        "winner_disagree_both": both_disagree,
+        "winner_disagree_rm_only": rm_only_disagree,
+        "winner_disagree_pm_only": pm_only_disagree,
         "pairwise_data": {
             "p_rm": all_p_rm,
             "p_emp": all_p_emp,
@@ -461,20 +497,39 @@ def make_figures(summary, results, output_dir):
     fig.savefig(output_dir / "figure_calibration.png", dpi=150)
     plt.close(fig)
 
-    # 3. Cross-prompt inflation histogram
-    all_inflation = []
+    # 3. Cross-prompt inflation histogram (RM vs PM side by side)
+    all_inflation_rm = []
+    all_inflation_pm = []
     for r in results:
-        all_inflation.extend(r["inflation"].tolist())
+        all_inflation_rm.extend(r["inflation"].tolist())
+        all_inflation_pm.extend(r["inflation_pm"].tolist())
 
-    fig, ax = plt.subplots(figsize=(8, 5))
-    bins = np.arange(min(all_inflation) - 0.5, max(all_inflation) + 1.5, 1)
-    ax.hist(all_inflation, bins=bins, edgecolor="black", alpha=0.7)
+    all_vals = all_inflation_rm + all_inflation_pm
+    bins = np.arange(min(all_vals) - 0.5, max(all_vals) + 1.5, 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+
+    ax = axes[0]
+    ax.hist(all_inflation_rm, bins=bins, edgecolor="black", alpha=0.7, color="steelblue")
     ax.axvline(0, color="red", linestyle="--", alpha=0.7)
-    ax.set_xlabel("rank_RM - rank_Emp_Borda (negative = RM overvalues)")
+    ax.set_xlabel("rank_RM - rank_Emp_Borda")
     ax.set_ylabel("Count")
-    ax.set_title("Cross-Prompt Inflation Distribution")
-    mean_infl = np.mean(all_inflation)
-    ax.text(0.02, 0.95, f"mean={mean_infl:.3f}", transform=ax.transAxes, va="top")
+    ax.set_title("RM Borda Inflation")
+    mean_rm = np.mean(all_inflation_rm)
+    abs_mean_rm = np.mean(np.abs(all_inflation_rm))
+    ax.text(0.02, 0.95, f"mean={mean_rm:.3f}\n|mean|={abs_mean_rm:.3f}",
+            transform=ax.transAxes, va="top", fontsize=10)
+
+    ax = axes[1]
+    ax.hist(all_inflation_pm, bins=bins, edgecolor="black", alpha=0.7, color="forestgreen")
+    ax.axvline(0, color="red", linestyle="--", alpha=0.7)
+    ax.set_xlabel("rank_PM - rank_Emp_Borda")
+    ax.set_title("PM Borda Inflation")
+    mean_pm = np.mean(all_inflation_pm)
+    abs_mean_pm = np.mean(np.abs(all_inflation_pm))
+    ax.text(0.02, 0.95, f"mean={mean_pm:.3f}\n|mean|={abs_mean_pm:.3f}",
+            transform=ax.transAxes, va="top", fontsize=10)
+
     plt.tight_layout()
     fig.savefig(output_dir / "figure_inflation_hist.png", dpi=150)
     plt.close(fig)
@@ -556,7 +611,8 @@ def build_flat_data(results, eval_records):
                 "borda_pm": float(r["borda_pm"][i]),
                 "borda_bt": float(r["borda_bt"][i]),
                 "copeland_emp": float(r["copeland_emp"][i]),
-                "inflation": int(r["inflation"][i]),
+                "inflation_rm": int(r["inflation"][i]),
+                "inflation_pm": int(r["inflation_pm"][i]),
                 "length": int(r["lengths"][i]),
                 "is_condorcet_winner": r["condorcet_winner"] == i,
                 "is_rm_winner": r["winner_rm"] == i,
@@ -649,7 +705,17 @@ def main():
         row = f"  {m:>11s}" + "  ".join(f"{kt[i, j]:>12.3f}" for j in range(len(methods)))
         print(row)
 
-    print(f"\n  Inflation distribution: {summary['inflation_distribution']}")
+    print(f"\n  RM inflation:  mean={summary['inflation_rm_mean']:.3f}  std={summary['inflation_rm_std']:.3f}  |mean|={summary['inflation_rm_abs_mean']:.3f}")
+    print(f"  PM inflation:  mean={summary['inflation_pm_mean']:.3f}  std={summary['inflation_pm_std']:.3f}  |mean|={summary['inflation_pm_abs_mean']:.3f}")
+    print(f"  RM inflation dist: {summary['inflation_distribution']}")
+    print(f"  PM inflation dist: {summary['inflation_pm_distribution']}")
+    n = summary['n_prompts']
+    print(f"\n  Winner disagreement breakdown (of {n} prompts):")
+    print(f"    RM wrong:       {summary['winner_disagree_rm']:>4d} ({summary['winner_disagree_rm']/n:.1%})")
+    print(f"    PM wrong:       {summary['winner_disagree_pm']:>4d} ({summary['winner_disagree_pm']/n:.1%})")
+    print(f"    Both wrong:     {summary['winner_disagree_both']:>4d} ({summary['winner_disagree_both']/n:.1%})")
+    print(f"    RM only wrong:  {summary['winner_disagree_rm_only']:>4d} ({summary['winner_disagree_rm_only']/n:.1%})")
+    print(f"    PM only wrong:  {summary['winner_disagree_pm_only']:>4d} ({summary['winner_disagree_pm_only']/n:.1%})")
 
     # Save
     print("\n" + "=" * 60)

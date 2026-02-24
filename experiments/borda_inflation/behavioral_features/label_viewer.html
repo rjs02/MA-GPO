@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Epistemic Strategy Label Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f5f5f5; color: #222; }
+  .toolbar {
+    position: sticky; top: 0; z-index: 10; background: #fff; border-bottom: 1px solid #ddd;
+    padding: 12px 20px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  }
+  .toolbar label { font-weight: 600; font-size: 14px; }
+  .toolbar select, .toolbar input { padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+  .toolbar select { min-width: 180px; }
+  .toolbar input[type="text"] { width: 260px; }
+  .stats { font-size: 13px; color: #666; margin-left: auto; }
+  #file-drop {
+    margin: 20px; padding: 40px; border: 2px dashed #bbb; border-radius: 8px;
+    text-align: center; color: #888; font-size: 16px; cursor: pointer;
+  }
+  #file-drop.dragover { border-color: #4a90d9; background: #eef4fb; }
+  #file-drop input { display: none; }
+  .cards { padding: 10px 20px 40px; }
+  .card {
+    background: #fff; border-radius: 8px; margin-bottom: 16px; padding: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08); border-left: 5px solid #ccc;
+  }
+  .card.strategy-1 { border-left-color: #4caf50; }
+  .card.strategy-2 { border-left-color: #f44336; }
+  .card.strategy-3 { border-left-color: #ff9800; }
+  .card.strategy-4 { border-left-color: #9c27b0; }
+  .card.strategy-5 { border-left-color: #607d8b; }
+  .card.strategy-6 { border-left-color: #795548; }
+  .card.strategy-7 { border-left-color: #2196f3; }
+  .card-header { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 12px;
+    font-size: 12px; font-weight: 600; color: #fff;
+  }
+  .badge.substance { background: #4caf50; }
+  .badge.surface { background: #f44336; }
+  .badge.neither { background: #9e9e9e; }
+  .badge.strategy { background: #333; }
+  .badge.split { background: #6a7; color: #fff; }
+  .meta { font-size: 12px; color: #999; }
+  .section-label { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #999; margin-bottom: 4px; letter-spacing: 0.5px; }
+  .prompt-text, .response-text, .cot-text {
+    white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.6;
+    padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; max-height: 300px; overflow-y: auto;
+  }
+  .prompt-text { background: #f0f4ff; border: 1px solid #d0dcf0; }
+  .response-text { background: #f9f9f0; border: 1px solid #e8e8d0; }
+  .cot-text { background: #f0f0f0; border: 1px solid #ddd; font-style: italic; color: #555; }
+  .inflation-row { display: flex; gap: 16px; font-size: 13px; color: #555; margin-bottom: 8px; }
+  .inflation-row span { background: #f5f5f5; padding: 2px 8px; border-radius: 4px; }
+  .pagination { display: flex; justify-content: center; gap: 8px; padding: 20px; }
+  .pagination button {
+    padding: 8px 16px; border: 1px solid #ccc; border-radius: 4px;
+    background: #fff; cursor: pointer; font-size: 14px;
+  }
+  .pagination button:hover { background: #eee; }
+  .pagination button:disabled { opacity: 0.4; cursor: default; }
+  .pagination .page-info { padding: 8px 12px; font-size: 14px; color: #666; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <label>Filter strategy:</label>
+  <select id="filter-strategy">
+    <option value="all">All strategies</option>
+    <option value="1">1 - Genuinely helpful</option>
+    <option value="2">2 - Sycophantic</option>
+    <option value="3">3 - Superficially polished</option>
+    <option value="4">4 - Assertive confabulation</option>
+    <option value="5">5 - Hedging/overcautious</option>
+    <option value="6">6 - Evasive/deflective</option>
+    <option value="7">7 - Concise & substantive</option>
+  </select>
+  <label>Split:</label>
+  <select id="filter-split">
+    <option value="all">All</option>
+    <option value="seen">Seen</option>
+    <option value="unseen">Unseen</option>
+  </select>
+  <label>Search:</label>
+  <input type="text" id="search-box" placeholder="Search prompt or response text...">
+  <label>Sort:</label>
+  <select id="sort-by">
+    <option value="index">Original order</option>
+    <option value="inflation_rm_desc">Inflation RM (high first)</option>
+    <option value="inflation_rm_asc">Inflation RM (low first)</option>
+    <option value="word_count_desc">Word count (long first)</option>
+    <option value="word_count_asc">Word count (short first)</option>
+  </select>
+  <div class="stats" id="stats"></div>
+</div>
+
+<div id="file-drop">
+  <p>Drop <code>features_pilot_labeled.jsonl</code> here or click to browse</p>
+  <input type="file" id="file-input" accept=".jsonl,.json">
+</div>
+
+<div class="cards" id="cards"></div>
+<div class="pagination" id="pagination"></div>
+
+<script>
+const PAGE_SIZE = 25;
+let allData = [];
+let filtered = [];
+let currentPage = 0;
+
+const strategyNames = {
+  1: 'Genuinely helpful', 2: 'Sycophantic', 3: 'Superficially polished',
+  4: 'Assertive confabulation', 5: 'Hedging/overcautious', 6: 'Evasive/deflective',
+  7: 'Concise & substantive'
+};
+
+const dropZone = document.getElementById('file-drop');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+
+document.getElementById('filter-strategy').addEventListener('change', applyFilters);
+document.getElementById('filter-split').addEventListener('change', applyFilters);
+document.getElementById('sort-by').addEventListener('change', applyFilters);
+let searchTimeout;
+document.getElementById('search-box').addEventListener('input', () => {
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(applyFilters, 300);
+});
+
+function handleFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const text = e.target.result;
+    allData = text.trim().split('\n').map((line, i) => {
+      const obj = JSON.parse(line);
+      obj._index = i;
+      return obj;
+    }).filter(d => d.strategy_id != null);
+    dropZone.style.display = 'none';
+    applyFilters();
+  };
+  reader.readAsText(file);
+}
+
+function applyFilters() {
+  const stratFilter = document.getElementById('filter-strategy').value;
+  const splitFilter = document.getElementById('filter-split').value;
+  const search = document.getElementById('search-box').value.toLowerCase();
+  const sortBy = document.getElementById('sort-by').value;
+
+  filtered = allData.filter(d => {
+    if (stratFilter !== 'all' && d.strategy_id !== parseInt(stratFilter)) return false;
+    if (splitFilter !== 'all' && d.split !== splitFilter) return false;
+    if (search && !(d.prompt || '').toLowerCase().includes(search) && !(d.response_text || '').toLowerCase().includes(search)) return false;
+    return true;
+  });
+
+  if (sortBy === 'inflation_rm_desc') filtered.sort((a, b) => (b.inflation_rm || 0) - (a.inflation_rm || 0));
+  else if (sortBy === 'inflation_rm_asc') filtered.sort((a, b) => (a.inflation_rm || 0) - (b.inflation_rm || 0));
+  else if (sortBy === 'word_count_desc') filtered.sort((a, b) => (b.word_count || 0) - (a.word_count || 0));
+  else if (sortBy === 'word_count_asc') filtered.sort((a, b) => (a.word_count || 0) - (b.word_count || 0));
+  else filtered.sort((a, b) => a._index - b._index);
+
+  // Update stats
+  const counts = {};
+  for (const d of filtered) counts[d.strategy_id] = (counts[d.strategy_id] || 0) + 1;
+  const parts = Object.entries(counts).sort((a, b) => a[0] - b[0]).map(([k, v]) => `${strategyNames[k]}: ${v}`);
+  document.getElementById('stats').textContent = `${filtered.length} / ${allData.length} entries | ${parts.join(' | ')}`;
+
+  currentPage = 0;
+  render();
+}
+
+function render() {
+  const start = currentPage * PAGE_SIZE;
+  const end = Math.min(start + PAGE_SIZE, filtered.length);
+  const page = filtered.slice(start, end);
+
+  const container = document.getElementById('cards');
+  container.innerHTML = page.map((d, i) => `
+    <div class="card strategy-${d.strategy_id}">
+      <div class="card-header">
+        <span class="badge strategy">${d.strategy_id} - ${strategyNames[d.strategy_id] || '?'}</span>
+        <span class="badge ${d.substance_or_surface}">${d.substance_or_surface}</span>
+        <span class="badge split">${d.split}</span>
+        <span class="meta">#${start + i + 1} (idx ${d._index}) | response_idx=${d.response_idx}</span>
+      </div>
+      <div class="inflation-row">
+        <span>inflation_rm: <b>${d.inflation_rm ?? '?'}</b></span>
+        <span>inflation_pm: <b>${d.inflation_pm ?? '?'}</b></span>
+        <span>rm_reward: <b>${(d.rm_reward ?? 0).toFixed(3)}</b></span>
+        <span>borda_emp: <b>${(d.borda_emp ?? 0).toFixed(2)}</b></span>
+        <span>words: <b>${d.word_count ?? '?'}</b></span>
+        <span>fmt_density: <b>${(d.formatting_density ?? 0).toFixed(4)}</b></span>
+      </div>
+      <div class="section-label">Prompt</div>
+      <div class="prompt-text">${escapeHtml(d.prompt || '')}</div>
+      <div class="section-label">Response</div>
+      <div class="response-text">${escapeHtml(d.response_text || '')}</div>
+      <div class="section-label">GPT Chain of Thought</div>
+      <div class="cot-text">${escapeHtml(d.chain_of_thought || '')}</div>
+    </div>
+  `).join('');
+
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  document.getElementById('pagination').innerHTML = `
+    <button onclick="goPage(0)" ${currentPage === 0 ? 'disabled' : ''}>&laquo;</button>
+    <button onclick="goPage(${currentPage - 1})" ${currentPage === 0 ? 'disabled' : ''}>&lsaquo; Prev</button>
+    <span class="page-info">Page ${totalPages > 0 ? currentPage + 1 : 0} / ${totalPages}</span>
+    <button onclick="goPage(${currentPage + 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>Next &rsaquo;</button>
+    <button onclick="goPage(${totalPages - 1})" ${currentPage >= totalPages - 1 ? 'disabled' : ''}>&raquo;</button>
+  `;
+  window.scrollTo(0, 0);
+}
+
+function goPage(p) { currentPage = p; render(); }
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+</script>
+</body>
+</html>
